@@ -1,0 +1,44 @@
+# Xcode
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+DerivedData/
+*.xccheckout
+*.moved-aside
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+build/
+*.build/
+
+# Swift Package Manager
+.swiftpm/
+Package.resolved
+.build/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Удалите, если есть (личные настройки)
+GoogleChat.xcworkspace/xcuserdata/
+*.xcconfig.local
+Config/GoogleChat.local.xcconfig
+
+# Никогда не публикуйте секреты (на всякий случай)
+*secret*.json
+*key*.json
+*.p8
