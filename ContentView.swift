@@ -14,7 +14,6 @@ struct ContentView: View {
         } else {
             mainChatView
                 .onAppear {
-                    // Если чаты ещё не загружены, загружаем
                     if chatVM.spaces.isEmpty && !authManager.accessToken.isEmpty {
                         chatVM.configure(with: authManager.accessToken, authManager: authManager)
                         Task {
@@ -50,13 +49,9 @@ struct ContentView: View {
                         isAuthenticating = false
                         if success {
                             print("✅ Успешный вход")
-                            // проверяем новые сообщения после успешного входа
                             self.chatVM.startBackgroundCheck()
-                            // сообщение об успешном входе
                             self.chatVM.sendWelcomeNotification()
-                            // Инициализируем чаты после входа
                             self.chatVM.configure(with: self.authManager.accessToken, authManager: self.authManager)
-                            // Запускаем таймер обновления токена
                             self.chatVM.startTokenRefreshTimer(authManager: self.authManager)
                             Task {
                                 await self.chatVM.loadSpaces()
@@ -150,8 +145,7 @@ struct ContentView: View {
                         Button("Выйти") {
                             authManager.signOut()
                             chatVM.clearData()
-                            chatVM.stopTokenRefreshTimer()  // Останавливаем таймер при выходе
-                            // перестаем проверять новые сообщения при выходе
+                            chatVM.stopTokenRefreshTimer()
                             chatVM.stopBackgroundCheck()
                         }
                         .font(.caption)
@@ -211,7 +205,6 @@ struct ContentView: View {
     }
 }
 
-// ChatDetailView без изменений (но можно улучшить, добавив вызов sendMessage)
 struct ChatDetailView: View {
     let space: ChatSpace
     @ObservedObject var chatVM: ChatViewModel
@@ -219,6 +212,9 @@ struct ChatDetailView: View {
     @State private var selectedFiles: [URL] = []
     @State private var scrollProxy: ScrollViewProxy?
     @State private var didInitialScroll = false
+    @State private var initialScrollTarget: (id: String, anchor: UnitPoint)?
+    @State private var isStabilizingInitialScroll = false
+    @State private var stabilizeInitialScrollUntil: Date?
     @State private var mentionQuery: String?
     
     var body: some View {
@@ -265,7 +261,10 @@ struct ChatDetailView: View {
                                 onSenderTap: { userId in
                                     Task { await chatVM.openDirectChat(with: userId) }
                                 },
-                                mentionDisplayNames: mentionDisplayNames
+                                mentionDisplayNames: mentionDisplayNames,
+                                onAttachmentLayoutChanged: {
+                                    stabilizeInitialScroll(using: proxy)
+                                }
                             )
                                 .id(message.id)
                                 .onAppear {
@@ -357,7 +356,6 @@ struct ChatDetailView: View {
                         newMessageText = ""
                         selectedFiles = []
                         
-                        // Прокрутка после отправки сообщения
                         if let firstId = chatVM.messages.first?.id {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                 withAnimation {
@@ -377,13 +375,33 @@ struct ChatDetailView: View {
     }
     
     private func scrollToInitialMessage(using proxy: ScrollViewProxy) {
-        guard !didInitialScroll, let targetId = chatVM.initialScrollMessageId(for: space.id) else {
+        guard !didInitialScroll, let target = chatVM.initialScrollTarget(for: space.id) else {
             return
         }
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            proxy.scrollTo(targetId, anchor: .bottom)
-            didInitialScroll = true
+        initialScrollTarget = target
+        stabilizeInitialScrollUntil = Date().addingTimeInterval(2.5)
+        didInitialScroll = true
+        stabilizeInitialScroll(using: proxy)
+    }
+
+    private func stabilizeInitialScroll(using proxy: ScrollViewProxy) {
+        guard let target = initialScrollTarget,
+              let stabilizeInitialScrollUntil,
+              Date() <= stabilizeInitialScrollUntil,
+              !isStabilizingInitialScroll else {
+            return
+        }
+        
+        isStabilizingInitialScroll = true
+        let delays: [TimeInterval] = [0.02, 0.08, 0.18, 0.35]
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                proxy.scrollTo(target.id, anchor: target.anchor)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (delays.last ?? 0.35) + 0.05) {
+            isStabilizingInitialScroll = false
         }
     }
     

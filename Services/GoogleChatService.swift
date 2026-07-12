@@ -13,7 +13,6 @@ class GoogleChatService {
         self.authManager = authManager
         self.currentUserEmail = currentUserEmail
         self.currentUserName = currentUserName
-        //print("🔧 GoogleChatService инициализирован")
     }
     
     var currentAccessToken: String {
@@ -36,9 +35,6 @@ class GoogleChatService {
             let displayName: String?
             let spaceType: String
         }
-        
-        //let rawString = String(data: data, encoding: .utf8) ?? "нет данных"
-
         
         let response = try JSONDecoder().decode(SpacesResponse.self, from: data)
         
@@ -114,8 +110,6 @@ class GoogleChatService {
     }
     
     func fetchMessages(spaceId: String, pageSize: Int = 100) async throws -> [Message] {
-        //print("📡 fetchMessages, текущий токен: \(accessToken.prefix(50))...")
-        
         var components = URLComponents(string: "\(baseURL)\(spaceId)/messages")
         components?.queryItems = [
             URLQueryItem(name: "pageSize", value: "\(pageSize)"),
@@ -130,24 +124,17 @@ class GoogleChatService {
         
         let (data, httpResponse) = try await URLSession.shared.data(for: request)
         
-        // Обработка 401 Unauthorized
         if let httpResponse = httpResponse as? HTTPURLResponse, httpResponse.statusCode == 401 {
             print("🔄 401 Unauthorized, пробуем обновить токен...")
             let refreshed = await authManager?.refreshAccessToken() ?? false
             if refreshed, let newToken = authManager?.accessToken {
                 self.accessToken = newToken
-                //print("✅ Токен обновлён, повторяем запрос...")
                 return try await fetchMessages(spaceId: spaceId, pageSize: pageSize)
             } else {
                 throw NSError(domain: "Auth", code: 401, userInfo: [NSLocalizedDescriptionKey: "Token expired and refresh failed"])
             }
         }
         
-        let rawString = String(data: data, encoding: .utf8) ?? "нет данных"
-        //print("📡 Сырой JSON сообщений (первые 2000 символов):")
-        //print(String(rawString.prefix(2000)))
-        
-        // Структуры для декодирования
         struct MessagesResponse: Decodable {
             let messages: [MessageItem]?
         }
@@ -296,12 +283,10 @@ class GoogleChatService {
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
-        // Печатаем HTTP статус
         if let httpResponse = response as? HTTPURLResponse {
             print("📡 HTTP статус: \(httpResponse.statusCode)")
         }
         
-        // Печатаем сырой ответ
         let rawResponse = String(data: data, encoding: .utf8) ?? "нет данных"
         print("📡 Сырой ответ People API: \(rawResponse)")
         
@@ -415,8 +400,6 @@ class GoogleChatService {
     }
     
     func fetchUserNameViaChatAPI(userId: String) async throws -> String {
-        // userId приходит в формате "users/123456789"
-        // Пробуем получить информацию о пользователе через Chat API
         let url = URL(string: "https://chat.googleapis.com/v1/\(userId)")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -492,33 +475,6 @@ class GoogleChatService {
         return email
     }
     
-    /*
-    func fetchSpaceMembers(spaceId: String) async throws -> [String] {
-        let url = URL(string: "\(baseURL)\(spaceId)/members")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        
-        let (data, _) = try await URLSession.shared.data(for: request)
-        
-        struct MembersResponse: Decodable {
-            let memberships: [Membership]
-        }
-        struct Membership: Decodable {
-            let member: Member
-        }
-        struct Member: Decodable {
-            let name: String  // "users/xxxx"
-            let type: String? // "HUMAN", "BOT"
-        }
-        
-        let response = try JSONDecoder().decode(MembersResponse.self, from: data)
-        let userIds = response.memberships
-            .compactMap { $0.member.name }
-            .filter { $0.hasPrefix("users/") }
-        return userIds
-    }
-    */
     func fetchSpaceMembers(spaceId: String) async throws -> [String] {
         print("📡 fetchSpaceMembers for spaceId: \(spaceId)")
         let url = URL(string: baseURL + "\(spaceId)/members")!
@@ -596,7 +552,7 @@ class GoogleChatService {
             let resourceName: String
         }
         let response = try JSONDecoder().decode(Response.self, from: data)
-        return response.resourceName // "people/123456789"
+        return response.resourceName
     }
     
     private func validateHTTPResponse(_ response: URLResponse, data: Data, domain: String) throws {

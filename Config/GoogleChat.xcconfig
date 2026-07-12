@@ -1,4 +1,3 @@
-// Shared build settings. Local values are loaded from GoogleChat.local.xcconfig when present.
 GOOGLE_CLIENT_ID = 
 GOOGLE_REVERSED_CLIENT_ID = 
 

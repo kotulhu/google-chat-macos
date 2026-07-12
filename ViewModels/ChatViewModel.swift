@@ -2,8 +2,6 @@ import Foundation
 import SwiftUI
 import UserNotifications
 
-
-
 @MainActor
 class ChatViewModel: NSObject,ObservableObject {
     @Published var spaces: [ChatSpace] = []
@@ -18,8 +16,6 @@ class ChatViewModel: NSObject,ObservableObject {
     private var pollTimer: Timer?
     
     private var tokenRefreshTimer: Timer?
-    
-    // для кэша количества новых сообщений
     private let defaults = UserDefaults.standard
     private let lastReadKeyPrefix = "lastRead_"
     private var backgroundTimer: Timer?
@@ -33,28 +29,19 @@ class ChatViewModel: NSObject,ObservableObject {
     
     private var userEmailCache: [String: String] = [:]
     private var memberCache: [String: [ChatUser]] = [:]
-    
-    // инициализация кэша имён
     private var userNameCache: [String: String] = [:]
     private let cacheDefaults = UserDefaults.standard
     private let userNameCacheKey = "userNameCache"
     
     private let mappingKey = "directChatUserMapping"
-    private var directChatUserMapping: [String: String] = [:] // spaceId -> userId собеседника
+    private var directChatUserMapping: [String: String] = [:]
     
-    private var currentUserId: String = "" // определение текущего юзера
+    private var currentUserId: String = ""
     private var currentUserEmail: String = ""
     private var currentUserName: String = ""
     
-    override init() {  // 👈 Добавлен override init
+    override init() {
         super.init()
-        
-        // 🔴 ВРЕМЕННО: Очищаем весь старый бажный кэш перед инициализацией
-            /*if let bundleID = Bundle.main.bundleIdentifier {
-                UserDefaults.standard.removePersistentDomain(forName: bundleID)
-                print("🧹 ПРИНУДИТЕЛЬНО ОЧИЩЕН ВЕСЬ USERDEFAULTS")
-            }
-             */
         
         loadCache()
         loadMapping()
@@ -65,14 +52,6 @@ class ChatViewModel: NSObject,ObservableObject {
             name: ConfigManager.localDisplayNameDidChangeNotification,
             object: nil
         )
-        
-        /*for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(lastReadKeyPrefix) {
-            defaults.removeObject(forKey: key)
-        }
-        print("🧹 Все lastReadTimestamp удалены")
-        
-        defaults.removeObject(forKey: mappingKey)
-         */
     }
     
     deinit {
@@ -88,9 +67,6 @@ class ChatViewModel: NSObject,ObservableObject {
         }
         objectWillChange.send()
     }
-    
-
-
     func setCurrentUserId() async {
         do {
             let peopleId = try await chatService?.fetchCurrentUserId() ?? ""
@@ -108,7 +84,6 @@ class ChatViewModel: NSObject,ObservableObject {
     }
 
     private func saveMapping() {
-        // Добавьте проверку, изменилось ли значение
         let currentMapping = defaults.dictionary(forKey: mappingKey) as? [String: String] ?? [:]
         if currentMapping != directChatUserMapping {
             defaults.set(directChatUserMapping, forKey: mappingKey)
@@ -163,15 +138,13 @@ class ChatViewModel: NSObject,ObservableObject {
         tokenRefreshTimer?.invalidate()
         tokenRefreshTimer = nil
     }
-    
-    // Методы для управления polling
     func startPolling(for space: ChatSpace) {
         stopPolling()
         print("🔄 Запуск polling для чата: \(space.name)")
         pollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self = self, let currentSpace = self.selectedSpace, currentSpace.id == space.id else { return }
             Task {
-                await self.loadMessages(for: space)  // полная перезагрузка
+                await self.loadMessages(for: space)
             }
         }
     }
@@ -198,15 +171,10 @@ class ChatViewModel: NSObject,ObservableObject {
         
         sentNotificationIds.removeAll()
         print("🧹 sentNotificationIds очищен")
-        
-        // Делегат теперь обрабатывается исключительно в AppDelegate.swift
-        // UNUserNotificationCenter.current().delegate = self
-        
         Task {
             await setCurrentUserId()
         }
         
-        // 👇 Запускаем фоновое обновление ОДИН раз в самом конце
         startBackgroundRefresh()
     }
     
@@ -261,7 +229,6 @@ class ChatViewModel: NSObject,ObservableObject {
             }
             for await (spaceId, lastMessage) in group {
                 if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
-                    // Если lastRead нет → чат ещё не открыт → считаем все сообщения непрочитанными
                     if let lastRead = loadLastReadTimestamp(for: spaceId) {
                         if let lastMessage = lastMessage, !lastMessage.isFromMe, lastMessage.timestamp > lastRead {
                             spaces[index].unreadCount = 1
@@ -269,7 +236,6 @@ class ChatViewModel: NSObject,ObservableObject {
                             spaces[index].unreadCount = 0
                         }
                     } else {
-                        // lastRead нет – значит, чат не открывался
                         if let lastMessage = lastMessage, !lastMessage.isFromMe {
                             spaces[index].unreadCount = 1
                         } else {
@@ -323,7 +289,6 @@ class ChatViewModel: NSObject,ObservableObject {
             var messagesWithNames: [Message] = []
             for var msg in fetchedMessages {
                 if let senderId = msg.senderId, !msg.isFromMe {
-                    // Синхронное получение имени из кэша (мгновенно)
                     msg.authorName = getUserName(userId: senderId)
                 } else {
                     msg.authorName = currentUserDisplayName
@@ -366,7 +331,7 @@ class ChatViewModel: NSObject,ObservableObject {
         guard let service = chatService, let space = selectedSpace else { return false }
         do {
             try await service.sendMessage(spaceId: space.id, text: text)
-            await loadMessages(for: space)   // немедленное обновление
+            await loadMessages(for: space)
             return true
         } catch {
             errorMessage = "Ошибка отправки: \(error.localizedDescription)"
@@ -387,32 +352,26 @@ class ChatViewModel: NSObject,ObservableObject {
         stopTokenRefreshTimer()
         stopBackgroundCheck()
         directChatUserMapping.removeAll()
-            //defaults.removeObject(forKey: mappingKey)
         print("🧹 Данные очищены")
     }
     
 
     func getUserName(userId: String) -> String {
-        // Сразу возвращаем из кэша, если есть
         if let cached = userNameCache[userId], isUsablePersonName(cached) {
             return cached
         }
         userNameCache.removeValue(forKey: userId)
         
-        // Пока нет имени — показываем короткий ID (6 цифр)
         let shortId = userId.replacingOccurrences(of: "users/", with: "").suffix(6)
         let fallback = "User \(shortId)"
         
-        // Запускаем загрузку в фоне (только один раз)
         Task {
-            // Проверяем ещё раз, возможно, кэш заполнился в другой гонке
             if userNameCache[userId] != nil { return }
             
             let realName = await fetchUserRealName(userId: userId)
             if realName != fallback {
                 userNameCache[userId] = realName
                 saveCache()
-                // Обновляем все сообщения этого пользователя в текущем чате
                 await MainActor.run {
                     for i in self.messages.indices {
                         if self.messages[i].senderId == userId {
@@ -452,7 +411,6 @@ class ChatViewModel: NSObject,ObservableObject {
     }
     
     private func fetchUserRealName(userId: String) async -> String {
-        // 1. Сначала пробуем Chat API — работает для всех участников чата
         do {
             let name = try await chatService?.fetchUserNameViaChatAPI(userId: userId) ?? ""
             if isUsablePersonName(name) {
@@ -463,7 +421,6 @@ class ChatViewModel: NSObject,ObservableObject {
             print("⚠️ Chat API не дал имя для \(userId): \(error)")
         }
 
-        // 2. Fallback: People API (работает только если пользователь есть в контактах)
         do {
             let email = try await chatService?.fetchUserEmail(userId: userId) ?? ""
             if !email.isEmpty {
@@ -473,7 +430,6 @@ class ChatViewModel: NSObject,ObservableObject {
             print("⚠️ People API не дал email для \(userId): \(error)")
         }
 
-        // 3. Последний fallback — короткий ID
         let shortId = userId.replacingOccurrences(of: "users/", with: "").suffix(6)
         return "User \(shortId)"
     }
@@ -606,19 +562,21 @@ class ChatViewModel: NSObject,ObservableObject {
     func lastReadMessageId(in messages: [Message]) -> String? {
         guard let space = selectedSpace else { return nil }
         let lastRead = space.lastReadTimestamp ?? Date()
-        // Находим сообщение, которое было последним прочитанным (время <= lastRead)
         if let candidate = messages.last(where: { $0.timestamp <= lastRead }) {
             return candidate.id
         }
         return messages.last?.id
     }
     
-    func initialScrollMessageId(for spaceId: String) -> String? {
-        if let lastRead = loadLastReadTimestamp(for: spaceId),
-           let firstUnread = messages.reversed().first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
-            return firstUnread.id
+    func initialScrollTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
+        if let lastRead = loadLastReadTimestamp(for: spaceId) {
+            if let firstUnread = messages.reversed().first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
+                return (firstUnread.id, .top)
+            }
+        } else if let firstUnread = messages.reversed().first(where: { !$0.isFromMe }) {
+            return (firstUnread.id, .top)
         }
-        return messages.first?.id
+        return messages.first.map { ($0.id, .bottom) }
     }
     
     func markMessageAsRead(_ message: Message, in spaceId: String) {
@@ -651,13 +609,10 @@ class ChatViewModel: NSObject,ObservableObject {
     
     func sendMessageAndScroll(_ text: String) async {
         await sendMessage(text)
-        // Сигнал для прокрутки
         await MainActor.run {
             objectWillChange.send()
         }
     }
-    
-    // Notifications
     private func sendNotification(for message: Message, in space: ChatSpace) {
         print("🔔 sendNotification вызван для чата: \(space.name), сообщение: \(message.text.prefix(50))")
         guard !message.isFromMe else {
@@ -665,23 +620,12 @@ class ChatViewModel: NSObject,ObservableObject {
             return
         }
         print("🔔 Формируем уведомление для чата: \(space.name)")
-        
-        /*
-        // Уникальный идентификатор сообщения
-           let messageId = "\(space.id)_\(message.timestamp.timeIntervalSince1970)"
-           
-           // Если уведомление уже отправлено — пропускаем
-           guard !sentNotificationIds.contains(messageId) else {
-               print("🔕 Уведомление уже отправлено: \(messageId)")
-               return
-           }
-        */
+
         let content = UNMutableNotificationContent()
         content.title = space.name
         content.body = "\(message.authorName): \(message.text)"
         content.sound = .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        // Проверяем, что мы на главном потоке
         print("🔔 Добавляем уведомление в центр: \(content.title) - \(content.body)")
         print("🔔 Текущий поток: \(Thread.current.isMainThread ? "главный" : "фоновый")")
         UNUserNotificationCenter.current().add(request) { error in
@@ -689,7 +633,6 @@ class ChatViewModel: NSObject,ObservableObject {
                 print("❌ Ошибка добавления уведомления: \(error.localizedDescription)")
             } else {
                 print("✅ Уведомление успешно добавлено для \(space.name)")
-                // Проверяем, что уведомление действительно в очереди
                 UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
                                 print("🔔 Ожидающих уведомлений: \(requests.count)")
                 }
@@ -726,27 +669,21 @@ class ChatViewModel: NSObject,ObservableObject {
                     continue
                 }
                 
-                // 1. Пытаемся загрузить дату из памяти (она возвращает опциональный Date?)
                 var lastRead = loadLastReadTimestamp(for: space.id)
 
-                // 2. ЗАЩИТА: Если вернулся 1970 год или битый старый кэш, сбрасываем в nil
                 if let readDate = lastRead, readDate.timeIntervalSince1970 < 1000000000 {
                     lastRead = nil
                 }
 
-                // 3. Избавляемся от опционала! Создаем actualLastRead типа Date (НЕ опциональная)
                 let actualLastRead = lastRead ?? Date()
 
-                // 4. ИСПРАВЛЕНО: Меняем порядок аргументов на (for:date:), как просит Xcode
                 if lastRead == nil {
                     saveLastReadTimestamp(for: space.id, date: actualLastRead)
                 }
 
                 print("   actualLastRead: \(actualLastRead)")
-                // ИСПРАВЛЕНО: Сравниваем с actualLastRead
                 print("   timestamp > actualLastRead: \(lastMessage.timestamp > actualLastRead)")
 
-                // 5. ИСПРАВЛЕНО: Используем гарантированно развернутую actualLastRead вместо опциональной lastRead
                 if lastMessage.timestamp > actualLastRead {
                     print("✅ НОВОЕ СООБЩЕНИЕ!")
                     let messageId = "\(space.id)_\(lastMessage.timestamp.timeIntervalSince1970)"

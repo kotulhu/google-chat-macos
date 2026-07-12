@@ -17,7 +17,6 @@ class GoogleAuthManager: ObservableObject {
     }
     
     func configure() {
-        //print("🔧 Настройка GoogleAuthManager с clientID: \(clientID)")
         let config = GIDConfiguration(clientID: ConfigManager.shared.clientID)
         GIDSignIn.sharedInstance.configuration = config
     }
@@ -25,13 +24,11 @@ class GoogleAuthManager: ObservableObject {
     func signIn(completion: @escaping (Bool, String) -> Void) {
         print("➡️ signIn() вызван")
         guard let window = NSApplication.shared.windows.first else {
-            //print("❌ Окно не найдено")
             completion(false, "Окно не найдено")
             return
         }
         print("✅ Найдено окно: \(window)")
         
-        // Запрашиваем необходимые права для работы с Google Chat
         let additionalScopes = [
             "https://www.googleapis.com/auth/chat.spaces.readonly",
             "https://www.googleapis.com/auth/chat.messages.readonly",
@@ -50,7 +47,6 @@ class GoogleAuthManager: ObservableObject {
             additionalScopes: additionalScopes
         ) { result, error in
             if let error = error {
-                //print("❌ Ошибка входа: \(error.localizedDescription)")
                 let message = error.localizedDescription
                 self.runOnMain {
                     completion(false, message)
@@ -76,10 +72,6 @@ class GoogleAuthManager: ObservableObject {
                 self.userName = name
                 self.accessToken = token
 
-                //print("✅ Авторизация успешна!")
-                //print("📧 Email: \(self.userEmail)")
-                //print("🔑 Токен: \(self.accessToken.prefix(50))...")
-
                 completion(true, email)
             }
         }
@@ -99,7 +91,6 @@ class GoogleAuthManager: ObservableObject {
     func refreshAccessToken() async -> Bool {
         await withCheckedContinuation { continuation in
             guard let user = GIDSignIn.sharedInstance.currentUser else {
-                //print("❌ refreshAccessToken: нет currentUser")
                 continuation.resume(returning: false)
                 return
             }
@@ -107,7 +98,6 @@ class GoogleAuthManager: ObservableObject {
             print("🔄 Вызов refreshTokensIfNeeded...")
             user.refreshTokensIfNeeded { refreshedUser, error in
                 if let error = error {
-                    //print("❌ Ошибка обновления токена: \(error.localizedDescription)")
                     continuation.resume(returning: false)
                     return
                 }
@@ -115,7 +105,6 @@ class GoogleAuthManager: ObservableObject {
                 let token = refreshedUser?.accessToken.tokenString ?? ""
                 self.runOnMain {
                     self.accessToken = token
-                    //print("✅ Токен обновлён: \(self.accessToken.prefix(50))...")
                     continuation.resume(returning: true)
                 }
             }

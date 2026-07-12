@@ -4,12 +4,13 @@ import SwiftUI
 
 class AttachmentCache {
     static let shared = AttachmentCache()
+    private static let memoryLimitBytes = 50 * 1024 * 1024
     private let cache = NSCache<NSString, NSData>()
     private let diskDirectory: URL
     
     private init() {
         cache.countLimit = 100
-        cache.totalCostLimit = 50 * 1024 * 1024 // 50 MB
+        cache.totalCostLimit = Self.memoryLimitBytes
         diskDirectory = CachePaths.baseDirectory.appendingPathComponent("Attachments", isDirectory: true)
         try? FileManager.default.createDirectory(at: diskDirectory, withIntermediateDirectories: true)
     }

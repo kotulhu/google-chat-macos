@@ -27,7 +27,6 @@ struct AttachmentView: View {
                         }
                 }
             } else {
-                // Не-изображения показываем как иконку с именем и размером
                 HStack {
                     Image(systemName: "doc")
                         .font(.title2)
@@ -55,7 +54,6 @@ struct AttachmentView: View {
     }
     
     private func loadImage() async {
-        // Используем thumbnailURL если есть, иначе оригинал
         guard let loadURL = attachment.thumbnailURL ?? attachment.url else {
             print("Нет URL для загрузки")
             return

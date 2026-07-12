@@ -13,7 +13,6 @@ extension String {
         detector?.enumerateMatches(in: displayText, options: [], range: nsRange) { match, _, _ in
             guard let match = match, let url = match.url else { return }
             if let range = Range(match.range, in: displayText) {
-                // Конвертируем Range<String.Index> в Range<AttributedString.Index>
                 let startIndex = AttributedString.Index(range.lowerBound, within: attributedString)!
                 let endIndex = AttributedString.Index(range.upperBound, within: attributedString)!
                 let attributedRange = startIndex..<endIndex

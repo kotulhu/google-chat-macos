@@ -1,6 +1,5 @@
 import Foundation
 
-// Для Attachment
 struct Attachment: Identifiable, Equatable, Codable {
     let id = UUID().uuidString
     let name: String
@@ -29,7 +28,6 @@ struct Attachment: Identifiable, Equatable, Codable {
     }
 }
 
-// Для Message
 struct Message: Identifiable, Equatable, Codable {
     let id: String
     let text: String
@@ -37,7 +35,7 @@ struct Message: Identifiable, Equatable, Codable {
     let isFromMe: Bool
     let timestamp: Date
     var attachments: [Attachment] = []
-    let senderId: String?   // новое поле
+    let senderId: String?
     
     init(
         id: String = UUID().uuidString,

@@ -5,6 +5,7 @@ struct MessageBubbleView: View {
     let accessToken: String
     var onSenderTap: ((String) -> Void)? = nil
     var mentionDisplayNames: [String: String] = [:]
+    var onAttachmentLayoutChanged: (() -> Void)? = nil
     
     var body: some View {
         HStack {
@@ -47,14 +48,17 @@ struct MessageBubbleView: View {
                         }
                 }
                 
-                // Отображение вложений
                 if !message.attachments.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                ForEach(message.attachments) { attachment in
-                                    AttachmentRow(attachment: attachment, accessToken: accessToken)
-                                }
-                            }
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(message.attachments) { attachment in
+                            AttachmentRow(
+                                attachment: attachment,
+                                accessToken: accessToken,
+                                onLayoutChanged: onAttachmentLayoutChanged
+                            )
                         }
+                    }
+                }
                 
                 Text(formatFullDate(message.timestamp))
                     .font(.caption2)
@@ -67,11 +71,11 @@ struct MessageBubbleView: View {
     }
     
     private func copyToClipboard() {
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(message.text, forType: .string)
-            print("📋 Текст скопирован")
-        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(message.text, forType: .string)
+        print("📋 Текст скопирован")
+    }
     
     private func formatFullDate(_ date: Date) -> String {
         let now = Date()
@@ -104,6 +108,7 @@ struct MessageBubbleView: View {
 struct AttachmentRow: View {
     let attachment: Attachment
     let accessToken: String
+    var onLayoutChanged: (() -> Void)? = nil
     @State private var imageData: Data?
     @State private var isLoading = true
     
@@ -149,7 +154,6 @@ struct AttachmentRow: View {
                     .cornerRadius(8)
                 }
             } else {
-                // Файл (не изображение)
                 HStack {
                     Image(systemName: fileIcon(for: attachment.mimeType))
                         .font(.title2)
@@ -181,10 +185,12 @@ struct AttachmentRow: View {
                 await MainActor.run {
                     self.imageData = cachedData
                     self.isLoading = false
+                    self.onLayoutChanged?()
                 }
             } else {
                 await MainActor.run {
                     self.isLoading = false
+                    self.onLayoutChanged?()
                 }
             }
             return
@@ -198,10 +204,12 @@ struct AttachmentRow: View {
                 await MainActor.run {
                     self.imageData = data
                     self.isLoading = false
+                    self.onLayoutChanged?()
                 }
             } else {
                 await MainActor.run {
                     self.isLoading = false
+                    self.onLayoutChanged?()
                 }
             }
         } catch {
@@ -209,6 +217,7 @@ struct AttachmentRow: View {
             print("❌ Ошибка загрузки: \(error)")
             await MainActor.run {
                 self.isLoading = false
+                self.onLayoutChanged?()
             }
         }
     }
@@ -403,13 +412,11 @@ struct AttachmentRow: View {
             return
         }
         
-        // Приоритет — использовать resourceName
         if let resourceName = attachment.resourceName {
             downloadUsingResourceName(resourceName, cacheKey: cacheKey)
             return
         }
         
-        // fallback на прямую загрузку (редко работает)
         guard let url = url else { return }
         let savePanel = NSSavePanel()
         savePanel.nameFieldStringValue = attachment.name
