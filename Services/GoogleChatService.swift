@@ -18,6 +18,26 @@ class GoogleChatService {
     var currentAccessToken: String {
         accessToken
     }
+
+    private func authorizedData(for request: URLRequest, retryOnUnauthorized: Bool = true) async throws -> (Data, URLResponse) {
+        var request = request
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        if retryOnUnauthorized,
+           let httpResponse = response as? HTTPURLResponse,
+           httpResponse.statusCode == 401 {
+            print("🔄 401 Unauthorized, пробуем обновить токен...")
+            let refreshed = await authManager?.refreshAccessToken() ?? false
+            guard refreshed, let newToken = authManager?.accessToken else {
+                throw NSError(domain: "Auth", code: 401, userInfo: [NSLocalizedDescriptionKey: "Token expired and refresh failed"])
+            }
+            self.accessToken = newToken
+            return try await authorizedData(for: request, retryOnUnauthorized: false)
+        }
+        
+        return (data, response)
+    }
     
     func fetchSpaces() async throws -> [ChatSpace] {
         let url = URL(string: baseURL + "spaces")!
@@ -120,20 +140,7 @@ class GoogleChatService {
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        
-        let (data, httpResponse) = try await URLSession.shared.data(for: request)
-        
-        if let httpResponse = httpResponse as? HTTPURLResponse, httpResponse.statusCode == 401 {
-            print("🔄 401 Unauthorized, пробуем обновить токен...")
-            let refreshed = await authManager?.refreshAccessToken() ?? false
-            if refreshed, let newToken = authManager?.accessToken {
-                self.accessToken = newToken
-                return try await fetchMessages(spaceId: spaceId, pageSize: pageSize)
-            } else {
-                throw NSError(domain: "Auth", code: 401, userInfo: [NSLocalizedDescriptionKey: "Token expired and refresh failed"])
-            }
-        }
+        let (data, _) = try await authorizedData(for: request)
         
         struct MessagesResponse: Decodable {
             let messages: [MessageItem]?
@@ -250,10 +257,15 @@ class GoogleChatService {
     }
 
     private func isCurrentUser(_ senderId: String?) -> Bool {
-        guard let senderId else { return false }
+        guard let senderId = normalizedUserId(senderId) else { return false }
         if senderId.hasSuffix("users/me") { return true }
         guard let currentUserId, !currentUserId.isEmpty else { return false }
         return senderId == currentUserId
+    }
+
+    private func normalizedUserId(_ userId: String?) -> String? {
+        guard let userId, !userId.isEmpty else { return nil }
+        return userId.replacingOccurrences(of: "people/", with: "users/")
     }
 
     private func attachmentToken(from uri: String?) -> String? {
@@ -396,6 +408,121 @@ class GoogleChatService {
                 code: (response as? HTTPURLResponse)?.statusCode ?? -1,
                 userInfo: [NSLocalizedDescriptionKey: "Message with attachment failed: \(body)"]
             )
+        }
+    }
+
+    func fetchReactions(messageId: String) async throws -> [MessageReaction] {
+        var allReactions: [ReactionItem] = []
+        var pageToken: String?
+        
+        repeat {
+            var components = URLComponents(string: "\(baseURL)\(messageId)/reactions")
+            var queryItems = [URLQueryItem(name: "pageSize", value: "200")]
+            if let pageToken, !pageToken.isEmpty {
+                queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
+            }
+            components?.queryItems = queryItems
+            guard let url = components?.url else { throw URLError(.badURL) }
+            
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            let (data, response) = try await authorizedData(for: request)
+            try validateHTTPResponse(response, data: data, domain: "GoogleChatReactionsList")
+            
+            let decoded = try JSONDecoder().decode(ReactionsListResponse.self, from: data)
+            allReactions.append(contentsOf: decoded.reactions ?? [])
+            pageToken = decoded.nextPageToken
+        } while pageToken?.isEmpty == false
+        
+        return aggregateReactions(allReactions)
+    }
+
+    func addReaction(messageId: String, emoji: String) async throws -> MessageReaction {
+        let trimmedEmoji = emoji.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedEmoji.isEmpty else { throw URLError(.badURL) }
+        guard let url = URL(string: "\(baseURL)\(messageId)/reactions") else { throw URLError(.badURL) }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["emoji": ["unicode": trimmedEmoji]])
+        
+        let (data, response) = try await authorizedData(for: request)
+        try validateHTTPResponse(response, data: data, domain: "GoogleChatReactionsCreate")
+        let reaction = try JSONDecoder().decode(ReactionItem.self, from: data)
+        return aggregateReactions([reaction]).first ?? MessageReaction(
+            emoji: trimmedEmoji,
+            userIds: [],
+            reactionNamesByUserId: [:],
+            isMine: true,
+            myReactionName: nil
+        )
+    }
+
+    func removeReaction(reactionId: String) async throws {
+        guard let url = URL(string: "\(baseURL)\(reactionId)") else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        
+        let (data, response) = try await authorizedData(for: request)
+        try validateHTTPResponse(response, data: data, domain: "GoogleChatReactionsDelete")
+    }
+
+    private struct ReactionsListResponse: Decodable {
+        let reactions: [ReactionItem]?
+        let nextPageToken: String?
+    }
+
+    private struct ReactionItem: Decodable {
+        let name: String
+        let user: ReactionUser?
+        let emoji: ReactionEmoji?
+    }
+
+    private struct ReactionUser: Decodable {
+        let name: String?
+    }
+
+    private struct ReactionEmoji: Decodable {
+        let unicode: String?
+    }
+
+    private func aggregateReactions(_ reactions: [ReactionItem]) -> [MessageReaction] {
+        var grouped: [String: [ReactionItem]] = [:]
+        for reaction in reactions {
+            guard let emoji = reaction.emoji?.unicode, !emoji.isEmpty else { continue }
+            grouped[emoji, default: []].append(reaction)
+        }
+        
+        return grouped.map { emoji, reactions in
+            var userIds: [String] = []
+            var reactionNamesByUserId: [String: String] = [:]
+            var isMine = false
+            var myReactionName: String?
+            
+            for reaction in reactions {
+                guard let userId = normalizedUserId(reaction.user?.name), !userId.isEmpty else { continue }
+                userIds.append(userId)
+                reactionNamesByUserId[userId] = reaction.name
+                if isCurrentUser(userId) {
+                    isMine = true
+                    myReactionName = reaction.name
+                }
+            }
+            
+            return MessageReaction(
+                emoji: emoji,
+                userIds: Array(Set(userIds)).sorted(),
+                reactionNamesByUserId: reactionNamesByUserId,
+                isMine: isMine,
+                myReactionName: myReactionName
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.count == rhs.count {
+                return lhs.emoji < rhs.emoji
+            }
+            return lhs.count > rhs.count
         }
     }
     

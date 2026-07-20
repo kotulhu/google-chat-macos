@@ -264,6 +264,12 @@ struct ChatDetailView: View {
                                 mentionDisplayNames: mentionDisplayNames,
                                 onAttachmentLayoutChanged: {
                                     stabilizeInitialScroll(using: proxy)
+                                },
+                                onLoadReactions: { messageId in
+                                    await chatVM.loadReactions(for: messageId)
+                                },
+                                onToggleReaction: { messageId, emoji in
+                                    await chatVM.toggleReaction(messageId: messageId, emoji: emoji)
                                 }
                             )
                                 .id(message.id)

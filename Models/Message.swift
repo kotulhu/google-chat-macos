@@ -28,6 +28,20 @@ struct Attachment: Identifiable, Equatable, Codable {
     }
 }
 
+struct MessageReaction: Identifiable, Equatable, Codable {
+    var id: String { emoji }
+    let emoji: String
+    var userIds: [String]
+    var reactionNamesByUserId: [String: String]
+    var isMine: Bool
+    var myReactionName: String?
+    
+    var count: Int {
+        userIds.count
+    }
+    
+}
+
 struct Message: Identifiable, Equatable, Codable {
     let id: String
     let text: String
@@ -36,6 +50,7 @@ struct Message: Identifiable, Equatable, Codable {
     let timestamp: Date
     var attachments: [Attachment] = []
     let senderId: String?
+    var reactions: [MessageReaction] = []
     
     init(
         id: String = UUID().uuidString,
@@ -44,7 +59,8 @@ struct Message: Identifiable, Equatable, Codable {
         isFromMe: Bool,
         timestamp: Date,
         attachments: [Attachment] = [],
-        senderId: String?
+        senderId: String?,
+        reactions: [MessageReaction] = []
     ) {
         self.id = id
         self.text = text
@@ -53,6 +69,7 @@ struct Message: Identifiable, Equatable, Codable {
         self.timestamp = timestamp
         self.attachments = attachments
         self.senderId = senderId
+        self.reactions = reactions
     }
     
     init(from decoder: Decoder) throws {
@@ -64,6 +81,7 @@ struct Message: Identifiable, Equatable, Codable {
         timestamp = try container.decode(Date.self, forKey: .timestamp)
         attachments = try container.decodeIfPresent([Attachment].self, forKey: .attachments) ?? []
         senderId = try container.decodeIfPresent(String.self, forKey: .senderId)
+        reactions = try container.decodeIfPresent([MessageReaction].self, forKey: .reactions) ?? []
     }
     
     static func == (lhs: Message, rhs: Message) -> Bool {
@@ -72,7 +90,8 @@ struct Message: Identifiable, Equatable, Codable {
         lhs.authorName == rhs.authorName &&
         lhs.isFromMe == rhs.isFromMe &&
         lhs.timestamp == rhs.timestamp &&
-        lhs.attachments == rhs.attachments
+        lhs.attachments == rhs.attachments &&
+        lhs.reactions == rhs.reactions
     }
     
     private enum CodingKeys: String, CodingKey {
@@ -83,5 +102,6 @@ struct Message: Identifiable, Equatable, Codable {
         case timestamp
         case attachments
         case senderId
+        case reactions
     }
 }

@@ -6,6 +6,8 @@ struct MessageBubbleView: View {
     var onSenderTap: ((String) -> Void)? = nil
     var mentionDisplayNames: [String: String] = [:]
     var onAttachmentLayoutChanged: (() -> Void)? = nil
+    var onLoadReactions: ((String) async -> Void)? = nil
+    var onToggleReaction: ((String, String) async -> Void)? = nil
     
     var body: some View {
         HStack {
@@ -45,6 +47,16 @@ struct MessageBubbleView: View {
                             Button("Копировать текст") {
                                 copyToClipboard()
                             }
+                            Divider()
+                            ForEach(quickReactionEmojis, id: \.self) { emoji in
+                                Button("Реакция \(emoji)") {
+                                    toggleReaction(emoji)
+                                }
+                            }
+                            Divider()
+                            Button("Открыть Emoji Picker") {
+                                NSApp.orderFrontCharacterPalette(nil)
+                            }
                         }
                 }
                 
@@ -59,6 +71,27 @@ struct MessageBubbleView: View {
                         }
                     }
                 }
+
+                if !message.reactions.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(message.reactions) { reaction in
+                                Button {
+                                    toggleReaction(reaction.emoji)
+                                } label: {
+                                    Text("\(reaction.emoji) \(reaction.count)")
+                                        .font(.caption)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(reaction.isMine ? Color.accentColor.opacity(0.25) : Color(NSColor.controlBackgroundColor))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: 260, alignment: message.isFromMe ? .trailing : .leading)
+                }
                 
                 Text(formatFullDate(message.timestamp))
                     .font(.caption2)
@@ -68,6 +101,21 @@ struct MessageBubbleView: View {
             if !message.isFromMe { Spacer() }
         }
         .padding(.horizontal)
+        .onAppear {
+            Task {
+                await onLoadReactions?(message.id)
+            }
+        }
+    }
+
+    private var quickReactionEmojis: [String] {
+        ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+    }
+
+    private func toggleReaction(_ emoji: String) {
+        Task {
+            await onToggleReaction?(message.id, emoji)
+        }
     }
     
     private func copyToClipboard() {

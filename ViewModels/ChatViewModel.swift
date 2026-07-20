@@ -29,6 +29,8 @@ class ChatViewModel: NSObject,ObservableObject {
     
     private var userEmailCache: [String: String] = [:]
     private var memberCache: [String: [ChatUser]] = [:]
+    private var reactionCache: [String: [MessageReaction]] = [:]
+    private var loadingReactionMessageIds = Set<String>()
     private var userNameCache: [String: String] = [:]
     private let cacheDefaults = UserDefaults.standard
     private let userNameCacheKey = "userNameCache"
@@ -275,6 +277,9 @@ class ChatViewModel: NSObject,ObservableObject {
         
         let cachedMessages = MessageCache.shared.get(spaceId: space.id)
         if let cachedMessages, !cachedMessages.isEmpty {
+            for message in cachedMessages where !message.reactions.isEmpty {
+                reactionCache[message.id] = message.reactions
+            }
             self.messages = normalizeMessagesForDisplay(cachedMessages)
         }
         
@@ -292,6 +297,9 @@ class ChatViewModel: NSObject,ObservableObject {
                     msg.authorName = getUserName(userId: senderId)
                 } else {
                     msg.authorName = currentUserDisplayName
+                }
+                if let cachedReactions = reactionCache[msg.id] {
+                    msg.reactions = cachedReactions
                 }
                 messagesWithNames.append(msg)
             }
@@ -321,7 +329,8 @@ class ChatViewModel: NSObject,ObservableObject {
                 isFromMe: true,
                 timestamp: message.timestamp,
                 attachments: message.attachments,
-                senderId: nil
+                senderId: nil,
+                reactions: message.reactions
             )
         }
     }
@@ -352,6 +361,8 @@ class ChatViewModel: NSObject,ObservableObject {
         stopTokenRefreshTimer()
         stopBackgroundCheck()
         directChatUserMapping.removeAll()
+        reactionCache.removeAll()
+        loadingReactionMessageIds.removeAll()
         print("🧹 Данные очищены")
     }
     
@@ -557,6 +568,123 @@ class ChatViewModel: NSObject,ObservableObject {
             print("❌ \(errorMessage!)")
             return false
         }
+    }
+
+    func loadReactions(for messageId: String) async {
+        if let cached = reactionCache[messageId] {
+            applyReactions(cached, to: messageId)
+            return
+        }
+        guard !loadingReactionMessageIds.contains(messageId), let service = chatService else {
+            return
+        }
+        
+        loadingReactionMessageIds.insert(messageId)
+        defer { loadingReactionMessageIds.remove(messageId) }
+        
+        do {
+            let reactions = try await service.fetchReactions(messageId: messageId)
+            reactionCache[messageId] = reactions
+            applyReactions(reactions, to: messageId)
+        } catch {
+            guard !isCancellation(error) else {
+                return
+            }
+            print("❌ Ошибка загрузки реакций для \(messageId): \(error)")
+        }
+    }
+
+    func toggleReaction(messageId: String, emoji: String) async {
+        guard let service = chatService,
+              let index = messages.firstIndex(where: { $0.id == messageId }) else {
+            return
+        }
+        
+        let oldReactions = messages[index].reactions
+        let hasMyReaction = oldReactions.first { $0.emoji == emoji && $0.isMine }
+        applyReactions(toggledReactions(oldReactions, emoji: emoji), to: messageId)
+        
+        do {
+            if let reactionName = hasMyReaction?.myReactionName {
+                try await service.removeReaction(reactionId: reactionName)
+            } else if hasMyReaction != nil {
+                let freshReactions = try await service.fetchReactions(messageId: messageId)
+                reactionCache[messageId] = freshReactions
+                guard let reactionName = freshReactions.first(where: { $0.emoji == emoji && $0.isMine })?.myReactionName else {
+                    applyReactions(freshReactions, to: messageId)
+                    return
+                }
+                try await service.removeReaction(reactionId: reactionName)
+            } else {
+                _ = try await service.addReaction(messageId: messageId, emoji: emoji)
+            }
+            
+            let reactions = try await service.fetchReactions(messageId: messageId)
+            reactionCache[messageId] = reactions
+            applyReactions(reactions, to: messageId)
+        } catch {
+            guard !isCancellation(error) else {
+                reactionCache[messageId] = oldReactions
+                applyReactions(oldReactions, to: messageId)
+                return
+            }
+            print("❌ Ошибка изменения реакции \(emoji) для \(messageId): \(error)")
+            reactionCache[messageId] = oldReactions
+            applyReactions(oldReactions, to: messageId)
+        }
+    }
+
+    private func applyReactions(_ reactions: [MessageReaction], to messageId: String) {
+        reactionCache[messageId] = reactions
+        if let index = messages.firstIndex(where: { $0.id == messageId }) {
+            messages[index].reactions = reactions
+            objectWillChange.send()
+        }
+    }
+
+    private func toggledReactions(_ reactions: [MessageReaction], emoji: String) -> [MessageReaction] {
+        let myId = currentUserId.isEmpty ? "users/me" : currentUserId
+        var result = reactions
+        if let index = result.firstIndex(where: { $0.emoji == emoji }) {
+            if result[index].isMine {
+                result[index].isMine = false
+                result[index].myReactionName = nil
+                result[index].userIds.removeAll { $0 == myId || $0 == "users/me" }
+                result[index].reactionNamesByUserId.removeValue(forKey: myId)
+                result[index].reactionNamesByUserId.removeValue(forKey: "users/me")
+                if result[index].userIds.isEmpty {
+                    result.remove(at: index)
+                }
+            } else {
+                result[index].isMine = true
+                if !result[index].userIds.contains(myId) {
+                    result[index].userIds.append(myId)
+                    result[index].userIds.sort()
+                }
+            }
+        } else {
+            result.append(MessageReaction(
+                emoji: emoji,
+                userIds: [myId],
+                reactionNamesByUserId: [:],
+                isMine: true,
+                myReactionName: nil
+            ))
+        }
+        return result.sorted { lhs, rhs in
+            if lhs.count == rhs.count {
+                return lhs.emoji < rhs.emoji
+            }
+            return lhs.count > rhs.count
+        }
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
     
     func lastReadMessageId(in messages: [Message]) -> String? {
