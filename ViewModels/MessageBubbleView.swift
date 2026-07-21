@@ -224,6 +224,7 @@ struct AttachmentRow: View {
                 .cornerRadius(8)
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: imageData)
     }
     
     private func loadImage() async {

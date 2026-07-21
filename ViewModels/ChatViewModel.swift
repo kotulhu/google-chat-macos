@@ -303,7 +303,9 @@ class ChatViewModel: NSObject,ObservableObject {
                 }
                 messagesWithNames.append(msg)
             }
-            self.messages = messagesWithNames
+            if self.messages != messagesWithNames {
+                self.messages = messagesWithNames
+            }
             MessageCache.shared.set(messagesWithNames, forSpaceId: space.id)
             
         } catch {

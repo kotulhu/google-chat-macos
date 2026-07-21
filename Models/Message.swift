@@ -1,7 +1,7 @@
 import Foundation
 
 struct Attachment: Identifiable, Equatable, Codable {
-    let id = UUID().uuidString
+    var id: String { resourceName ?? uploadToken ?? url?.absoluteString ?? name }
     let name: String
     let url: URL?
     let mimeType: String
