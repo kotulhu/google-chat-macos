@@ -247,6 +247,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 }
             }
         }
+        updateDockBadge()
     }
     
     func startBackgroundRefresh() {
@@ -365,6 +366,7 @@ class ChatViewModel: NSObject,ObservableObject {
         directChatUserMapping.removeAll()
         reactionCache.removeAll()
         loadingReactionMessageIds.removeAll()
+        updateDockBadge()
         print("🧹 Данные очищены")
     }
     
@@ -726,6 +728,7 @@ class ChatViewModel: NSObject,ObservableObject {
             }
             spaces[index].unreadCount = hasUnreadAfterVisibleMessage ? 1 : 0
         }
+        updateDockBadge()
     }
     
     func saveLastReadTimestamp(for spaceId: String, date: Date) {
@@ -831,6 +834,7 @@ class ChatViewModel: NSObject,ObservableObject {
                         
                         if let index = self.spaces.firstIndex(where: { $0.id == space.id }) {
                             self.spaces[index].unreadCount += 1
+                            self.updateDockBadge()
                             print("🔴 unreadCount для \(space.name) = \(self.spaces[index].unreadCount)")
                         }
                     }
@@ -884,6 +888,11 @@ class ChatViewModel: NSObject,ObservableObject {
     func stopBackgroundCheck() {
         backgroundCheckTimer?.invalidate()
         backgroundCheckTimer = nil
+    }
+
+    private func updateDockBadge() {
+        let total = spaces.reduce(0) { $0 + $1.unreadCount }
+        NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : ""
     }
     
     private func refreshDirectChatMappingsAndNames() async {
