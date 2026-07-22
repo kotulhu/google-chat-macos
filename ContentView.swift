@@ -265,8 +265,11 @@ struct ChatDetailView: View {
                                 onAttachmentLayoutChanged: {
                                     stabilizeInitialScroll(using: proxy)
                                 },
-                                onLoadReactions: { messageId in
-                                    await chatVM.loadReactions(for: messageId)
+                                onViewportVisible: { messageId in
+                                    chatVM.markReactionViewportVisible(id: messageId)
+                                },
+                                onViewportHidden: { messageId in
+                                    chatVM.markReactionViewportHidden(id: messageId)
                                 },
                                 onToggleReaction: { messageId, emoji in
                                     await chatVM.toggleReaction(messageId: messageId, emoji: emoji)

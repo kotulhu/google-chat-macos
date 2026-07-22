@@ -41,7 +41,11 @@ class ChatViewModel: NSObject,ObservableObject {
     private var currentUserId: String = ""
     private var currentUserEmail: String = ""
     private var currentUserName: String = ""
-    
+
+    private lazy var reactionViewportController = ViewportRefreshController { [weak self] messageId in
+        await self?.loadReactions(for: messageId)
+    }
+
     override init() {
         super.init()
         
@@ -149,11 +153,13 @@ class ChatViewModel: NSObject,ObservableObject {
                 await self.loadMessages(for: space)
             }
         }
+        reactionViewportController.start()
     }
 
     func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
+        reactionViewportController.stop()
         print("🛑 Остановка polling")
     }
     
@@ -572,6 +578,14 @@ class ChatViewModel: NSObject,ObservableObject {
             print("❌ \(errorMessage!)")
             return false
         }
+    }
+
+    func markReactionViewportVisible(id: String) {
+        reactionViewportController.markVisible(id: id)
+    }
+
+    func markReactionViewportHidden(id: String) {
+        reactionViewportController.markHidden(id: id)
     }
 
     func loadReactions(for messageId: String) async {

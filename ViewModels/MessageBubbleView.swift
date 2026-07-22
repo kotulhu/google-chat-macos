@@ -6,7 +6,8 @@ struct MessageBubbleView: View {
     var onSenderTap: ((String) -> Void)? = nil
     var mentionDisplayNames: [String: String] = [:]
     var onAttachmentLayoutChanged: (() -> Void)? = nil
-    var onLoadReactions: ((String) async -> Void)? = nil
+    var onViewportVisible: ((String) -> Void)? = nil
+    var onViewportHidden: ((String) -> Void)? = nil
     var onToggleReaction: ((String, String) async -> Void)? = nil
     
     var body: some View {
@@ -102,9 +103,10 @@ struct MessageBubbleView: View {
         }
         .padding(.horizontal)
         .onAppear {
-            Task {
-                await onLoadReactions?(message.id)
-            }
+            onViewportVisible?(message.id)
+        }
+        .onDisappear {
+            onViewportHidden?(message.id)
         }
     }
 
