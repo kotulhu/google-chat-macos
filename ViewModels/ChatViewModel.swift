@@ -43,7 +43,7 @@ class ChatViewModel: NSObject,ObservableObject {
     private var currentUserName: String = ""
 
     private lazy var reactionViewportController = ViewportRefreshController { [weak self] messageId in
-        await self?.loadReactions(for: messageId)
+        await self?.loadReactions(for: messageId, force: true)
     }
 
     override init() {
@@ -594,8 +594,8 @@ class ChatViewModel: NSObject,ObservableObject {
         reactionViewportController.markHidden(id: id)
     }
 
-    func loadReactions(for messageId: String) async {
-        if let cached = reactionCache[messageId] {
+    func loadReactions(for messageId: String, force: Bool = false) async {
+        if !force, let cached = reactionCache[messageId] {
             applyReactions(cached, to: messageId)
             return
         }
@@ -804,8 +804,11 @@ class ChatViewModel: NSObject,ObservableObject {
                 if let readDate = lastRead, readDate.timeIntervalSince1970 < 1000000000 {
                     lastRead = nil
                 }
-                let actualLastRead = lastRead ?? Date()
-                if lastRead == nil {
+                let actualLastRead: Date
+                if let lr = lastRead {
+                    actualLastRead = lr
+                } else {
+                    actualLastRead = lastMessage.timestamp
                     saveLastReadTimestamp(for: space.id, date: actualLastRead)
                 }
 
