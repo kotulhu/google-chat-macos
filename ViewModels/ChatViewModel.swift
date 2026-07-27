@@ -146,7 +146,6 @@ class ChatViewModel: NSObject,ObservableObject {
     }
     func startPolling(for space: ChatSpace) {
         stopPolling()
-        print("🔄 Запуск polling для чата: \(space.name)")
         pollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self = self, let currentSpace = self.selectedSpace, currentSpace.id == space.id else { return }
             Task {
@@ -154,6 +153,7 @@ class ChatViewModel: NSObject,ObservableObject {
             }
         }
         reactionViewportController.start()
+        print("🔄 [Poll] startPolling for: \(space.name), backgroundCheckTimer=\(backgroundCheckTimer != nil ? "running" : "NOT running")")
     }
 
     func stopPolling() {
@@ -201,7 +201,7 @@ class ChatViewModel: NSObject,ObservableObject {
             print("✅ Получено \(fetchedSpaces.count) чатов")
             self.spaces = fetchedSpaces
             startBackgroundCheck()
-            
+
             if currentUserId.isEmpty {
                 await fetchCurrentUserId()
             }
@@ -209,9 +209,15 @@ class ChatViewModel: NSObject,ObservableObject {
             await refreshDirectChatMappingsAndNames()
             
             self.objectWillChange.send()
-            print("DEBUG: spaces after name update: \(self.spaces.map { "\($0.name) (\($0.type))" })")
             
             await refreshUnreadCounts()
+
+            print("🔧 [Diag] spaces=\(spaces.count), bgTimer=\(backgroundCheckTimer != nil ? "YES" : "NO"), service=\(chatService != nil ? "YES" : "NO")")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self else { return }
+                print("🔧 [Diag+5s] spaces=\(self.spaces.count), bgTimer=\(self.backgroundCheckTimer != nil ? "YES" : "NO"), selected=\(self.selectedSpace?.name ?? "none")")
+                Task { await self.checkAllSpacesForNewMessages() }
+            }
             if let first = fetchedSpaces.first {
                 self.selectedSpace = first
                 await loadMessages(for: first)
@@ -761,86 +767,58 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
     private func sendNotification(for message: Message, in space: ChatSpace) {
-        print("🔔 sendNotification вызван для чата: \(space.name), сообщение: \(message.text.prefix(50))")
-        guard !message.isFromMe else {
-            print("🔕 Уведомление не отправлено (сообщение от себя)")
-            return
-        }
-        print("🔔 Формируем уведомление для чата: \(space.name)")
+        guard !message.isFromMe else { return }
 
         let content = UNMutableNotificationContent()
         content.title = space.name
         content.body = "\(message.authorName): \(message.text)"
         content.sound = .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        print("🔔 Добавляем уведомление в центр: \(content.title) - \(content.body)")
-        print("🔔 Текущий поток: \(Thread.current.isMainThread ? "главный" : "фоновый")")
+        print("🔔 [Notify] sending: \"\(space.name)\" — \(message.authorName): \(message.text.prefix(40))")
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
-                print("❌ Ошибка добавления уведомления: \(error.localizedDescription)")
+                print("🔔 [Notify] ERROR: \(error.localizedDescription)")
             } else {
-                print("✅ Уведомление успешно добавлено для \(space.name)")
-                UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
-                                print("🔔 Ожидающих уведомлений: \(requests.count)")
-                }
+                print("🔔 [Notify] OK id=\(request.identifier)")
             }
         }
     }
     
     func checkAllSpacesForNewMessages() async {
-        print("🟢🟢🟢 checkAllSpacesForNewMessages НАЧАЛО 🟢🟢🟢")
+        print("🟢 [Check] START: spaces=\(spaces.count), selected=\(selectedSpace?.name ?? "nil"), dedup=\(sentNotificationIds.count)")
         guard let service = chatService else {
-            print("❌ chatService = nil")
+            print("🟢 [Check] ABORT: chatService=nil")
             return
         }
         
         for space in spaces {
-            print("--- Проверяем чат: \(space.name) ---")
-            if selectedSpace?.id == space.id {
-                print("⏭ Пропускаем (активный чат)")
-                continue
-            }
+            if selectedSpace?.id == space.id { continue }
             
             do {
                 let latestMessages = try await service.fetchMessages(spaceId: space.id, pageSize: 1)
-                guard let lastMessage = latestMessages.first else {
-                    print("📭 Нет сообщений в чате")
-                    continue
-                }
+                guard let lastMessage = latestMessages.first else { continue }
                 
-                print("📨 Последнее сообщение от: \(lastMessage.authorName), время: \(lastMessage.timestamp)")
-                print("   От себя? \(lastMessage.isFromMe)")
-                
-                if lastMessage.isFromMe {
-                    print("⏭ Пропускаем (своё сообщение)")
-                    continue
-                }
+                guard !lastMessage.isFromMe else { continue }
                 
                 var lastRead = loadLastReadTimestamp(for: space.id)
-
                 if let readDate = lastRead, readDate.timeIntervalSince1970 < 1000000000 {
                     lastRead = nil
                 }
-
                 let actualLastRead = lastRead ?? Date()
-
                 if lastRead == nil {
                     saveLastReadTimestamp(for: space.id, date: actualLastRead)
                 }
 
-                print("   actualLastRead: \(actualLastRead)")
-                print("   timestamp > actualLastRead: \(lastMessage.timestamp > actualLastRead)")
-
-                if lastMessage.timestamp > actualLastRead {
-                    print("✅ НОВОЕ СООБЩЕНИЕ!")
+                let isNew = lastMessage.timestamp > actualLastRead
+                print("🟢 [Check] \(space.name): msg=\(lastMessage.timestamp), lastRead=\(actualLastRead), new=\(isNew), isMe=\(lastMessage.isFromMe)")
+                
+                if isNew {
                     let messageId = "\(space.id)_\(lastMessage.timestamp.timeIntervalSince1970)"
                     
                     if sentNotificationIds.contains(messageId) {
-                        print("⚠️ Уведомление уже отправлено для \(messageId)")
+                        print("🟢 [Check] \(space.name): SKIP (dedup)")
                     } else {
                         sentNotificationIds.insert(messageId)
-                        print("🔔 Отправляем уведомление...")
-                        
                         let notificationMessage = await messageWithResolvedAuthor(lastMessage)
                         await MainActor.run {
                             self.sendNotification(for: notificationMessage, in: space)
@@ -849,17 +827,15 @@ class ChatViewModel: NSObject,ObservableObject {
                         if let index = self.spaces.firstIndex(where: { $0.id == space.id }) {
                             self.spaces[index].unreadCount += 1
                             self.updateDockBadge()
-                            print("🔴 unreadCount для \(space.name) = \(self.spaces[index].unreadCount)")
+                            print("🟢 [Check] \(space.name): NOTIFICATION sent, unread=\(self.spaces[index].unreadCount)")
                         }
                     }
-                } else {
-                    print("⏩ Сообщение уже прочитано")
                 }
             } catch {
-                print("❌ Ошибка: \(error)")
+                print("🟢 [Check] \(space.name): ERROR \(error.localizedDescription)")
             }
         }
-        print("🟢🟢🟢 checkAllSpacesForNewMessages КОНЕЦ 🟢🟢🟢")
+        print("🟢 [Check] DONE")
     }
 
     private func messageWithResolvedAuthor(_ message: Message) async -> Message {
@@ -889,14 +865,12 @@ class ChatViewModel: NSObject,ObservableObject {
     
     func startBackgroundCheck() {
         backgroundCheckTimer?.invalidate()
-        print("⏰ Создаём таймер с интервалом 60 секунд")
         backgroundCheckTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
-            print("⏰ Таймер сработал, вызываем checkAllSpacesForNewMessages")
-            print("⏰ Таймер сработал!")
-            Task { await self?.checkAllSpacesForNewMessages() }
+            guard let self else { return }
+            print("⏰ [Timer tick] spaces=\(self.spaces.count), service=\(self.chatService != nil ? "OK" : "nil")")
+            Task { await self.checkAllSpacesForNewMessages() }
         }
-        print("⏰ Запущен фоновый опрос чатов (раз в 60 секунд), таймер = \(backgroundCheckTimer?.description ?? "nil")")
-        print("⏰ Запущен фоновый опрос чатов (раз в 60 секунд), таймер = \(backgroundCheckTimer?.description ?? "nil")")
+        print("⏰ startBackgroundCheck: таймер запущен (60с)")
     }
 
     func stopBackgroundCheck() {

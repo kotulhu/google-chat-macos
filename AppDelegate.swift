@@ -31,8 +31,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        print("🔔 willPresent вызван для: \(notification.request.content.title)")
+        let content = notification.request.content
+        print("🔔 willPresent: title=\"\(content.title)\" body=\"\(content.body.prefix(60))\" sound=\(content.sound != nil)")
         
-        completionHandler([.alert, .sound])
+        completionHandler([.alert, .sound, .badge])
     }
 }
