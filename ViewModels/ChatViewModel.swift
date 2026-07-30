@@ -200,6 +200,7 @@ class ChatViewModel: NSObject,ObservableObject {
             
             print("✅ Получено \(fetchedSpaces.count) чатов")
             self.spaces = fetchedSpaces
+            sortSpaces()
             startBackgroundCheck()
 
             if currentUserId.isEmpty {
@@ -243,6 +244,9 @@ class ChatViewModel: NSObject,ObservableObject {
             }
             for await (spaceId, lastMessage) in group {
                 if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
+                    if let lastMessage = lastMessage {
+                        spaces[index].lastMessageTimestamp = lastMessage.timestamp
+                    }
                     if let lastRead = loadLastReadTimestamp(for: spaceId) {
                         if let lastMessage = lastMessage, !lastMessage.isFromMe, lastMessage.timestamp > lastRead {
                             spaces[index].unreadCount = 1
@@ -320,6 +324,18 @@ class ChatViewModel: NSObject,ObservableObject {
                 self.messages = messagesWithNames
             }
             MessageCache.shared.set(messagesWithNames, forSpaceId: space.id)
+            
+            if let latestMsg = messagesWithNames.last,
+               let idx = spaces.firstIndex(where: { $0.id == space.id }) {
+                let old = spaces[idx].lastMessageTimestamp
+                let hasNewer = latestMsg.timestamp > (old ?? .distantPast)
+                if old == nil || hasNewer {
+                    spaces[idx].lastMessageTimestamp = latestMsg.timestamp
+                    if hasNewer {
+                        sortSpaces()
+                    }
+                }
+            }
             
         } catch {
             if cachedMessages?.isEmpty != false {
@@ -791,12 +807,21 @@ class ChatViewModel: NSObject,ObservableObject {
             return
         }
         
+        var hasNewMessage = false
         for space in spaces {
             if selectedSpace?.id == space.id { continue }
             
             do {
                 let latestMessages = try await service.fetchMessages(spaceId: space.id, pageSize: 1)
                 guard let lastMessage = latestMessages.first else { continue }
+                
+                if let idx = spaces.firstIndex(where: { $0.id == space.id }) {
+                    let old = spaces[idx].lastMessageTimestamp
+                    let hasNewer = lastMessage.timestamp > (old ?? .distantPast)
+                    if old == nil || hasNewer {
+                        spaces[idx].lastMessageTimestamp = lastMessage.timestamp
+                    }
+                }
                 
                 guard !lastMessage.isFromMe else { continue }
                 
@@ -822,6 +847,7 @@ class ChatViewModel: NSObject,ObservableObject {
                         print("🟢 [Check] \(space.name): SKIP (dedup)")
                     } else {
                         sentNotificationIds.insert(messageId)
+                        hasNewMessage = true
                         let notificationMessage = await messageWithResolvedAuthor(lastMessage)
                         await MainActor.run {
                             self.sendNotification(for: notificationMessage, in: space)
@@ -838,6 +864,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 print("🟢 [Check] \(space.name): ERROR \(error.localizedDescription)")
             }
         }
+        if hasNewMessage { sortSpaces() }
         print("🟢 [Check] DONE")
     }
 
@@ -884,6 +911,21 @@ class ChatViewModel: NSObject,ObservableObject {
     private func updateDockBadge() {
         let total = spaces.reduce(0) { $0 + $1.unreadCount }
         NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : ""
+    }
+    
+    private func sortSpaces() {
+        spaces = spaces.sorted { a, b in
+            let aBucket = a.lastMessageTimestamp.map { Int($0.timeIntervalSince1970 / 300) } ?? -1
+            let bBucket = b.lastMessageTimestamp.map { Int($0.timeIntervalSince1970 / 300) } ?? -1
+            if aBucket != bBucket {
+                return aBucket > bBucket
+            }
+            if a.type != b.type {
+                if a.type == .direct { return true }
+                if b.type == .direct { return false }
+            }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
     }
     
     private func refreshDirectChatMappingsAndNames() async {

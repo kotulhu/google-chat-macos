@@ -6,6 +6,7 @@ import AppKit
 struct ChatSandboxApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var authManager = GoogleAuthManager()
+    @State private var showAbout = false
     
     var body: some Scene {
         WindowGroup {
@@ -19,10 +20,18 @@ struct ChatSandboxApp: App {
                 .onAppear {
                     authManager.configure()
                 }
+                .sheet(isPresented: $showAbout) {
+                    AboutView()
+                }
         }
         .windowStyle(.titleBar)
         .windowResizability(.contentSize)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("О программе") {
+                    showAbout = true
+                }
+            }
             CommandGroup(replacing: .appSettings) {
                 Button("Настройки...") {
                     NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)

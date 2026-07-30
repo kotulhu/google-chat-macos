@@ -7,6 +7,7 @@ struct ChatSpace: Identifiable, Hashable {
     let lastMessage: String?
     var unreadCount: Int = 0
     var lastReadTimestamp: Date? = nil
+    var lastMessageTimestamp: Date? = nil
     
     enum SpaceType {
         case channel, direct, group
