@@ -216,6 +216,7 @@ struct ChatDetailView: View {
     @State private var isStabilizingInitialScroll = false
     @State private var stabilizeInitialScrollUntil: Date?
     @State private var mentionQuery: String?
+    @State private var inputHeight: CGFloat = 36
     
     var body: some View {
         VStack(spacing: 0) {
@@ -331,48 +332,39 @@ struct ChatDetailView: View {
                 }
                 .help("Прикрепить файлы")
                 
-                TextField("Сообщение...", text: $newMessageText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .padding(8)
-                    .background(Color(NSColor.controlBackgroundColor))
-                    .cornerRadius(8)
-                    .onChange(of: newMessageText) { text in
-                        updateMentionQuery(from: text)
+                MessageInputTextView(
+                    text: $newMessageText,
+                    onSend: { sendInputMessage() },
+                    onHeightChange: { height in
+                        inputHeight = height
                     }
-                    .onAppear {
-                        Task { await chatVM.loadMembers(for: space.id) }
-                    }
+                )
+                .frame(height: inputHeight)
+                .padding(8)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+                .overlay(
+                    Group {
+                        if newMessageText.isEmpty && selectedFiles.isEmpty {
+                            Text("Сообщение...")
+                                .font(.body)
+                                .foregroundColor(Color.secondary.opacity(0.7))
+                                .padding(.horizontal, 13)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .allowsHitTesting(false)
+                        }
+                    },
+                    alignment: .leading
+                )
+                .onChange(of: newMessageText) { text in
+                    updateMentionQuery(from: text)
+                }
+                .onAppear {
+                    Task { await chatVM.loadMembers(for: space.id) }
+                }
                 
                 Button("Отправить") {
-                    guard !newMessageText.isEmpty || !selectedFiles.isEmpty else { return }
-                    Task {
-                        var attachmentUploadTokens: [String] = []
-                        var uploadFailed = false
-                        for fileURL in selectedFiles {
-                            do {
-                                let uploadToken = try await chatVM.uploadFile(fileURL: fileURL, to: space.id)
-                                attachmentUploadTokens.append(uploadToken)
-                            } catch {
-                                uploadFailed = true
-                                print("Ошибка загрузки \(fileURL.lastPathComponent): \(error)")
-                            }
-                        }
-                        if uploadFailed {
-                            return
-                        }
-                        let sent = await chatVM.sendMessage(newMessageText, attachments: attachmentUploadTokens)
-                        guard sent else { return }
-                        newMessageText = ""
-                        selectedFiles = []
-                        
-                        if let firstId = chatVM.messages.first?.id {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                withAnimation {
-                                    scrollProxy?.scrollTo(firstId, anchor: .bottom)
-                                }
-                            }
-                        }
-                    }
+                    sendInputMessage()
                 }
                 .disabled((newMessageText.isEmpty && selectedFiles.isEmpty))
                 .buttonStyle(.borderedProminent)
@@ -380,6 +372,39 @@ struct ChatDetailView: View {
             .padding()
             .background(Color(NSColor.windowBackgroundColor))
             .overlay(Divider(), alignment: .top)
+        }
+    }
+    
+    private func sendInputMessage() {
+        let text = newMessageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !selectedFiles.isEmpty else { return }
+        Task {
+            var attachmentUploadTokens: [String] = []
+            var uploadFailed = false
+            for fileURL in selectedFiles {
+                do {
+                    let uploadToken = try await chatVM.uploadFile(fileURL: fileURL, to: space.id)
+                    attachmentUploadTokens.append(uploadToken)
+                } catch {
+                    uploadFailed = true
+                    print("Ошибка загрузки \(fileURL.lastPathComponent): \(error)")
+                }
+            }
+            if uploadFailed {
+                return
+            }
+            let sent = await chatVM.sendMessage(text, attachments: attachmentUploadTokens)
+            guard sent else { return }
+            newMessageText = ""
+            selectedFiles = []
+            
+            if let firstId = chatVM.messages.first?.id {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    withAnimation {
+                        scrollProxy?.scrollTo(firstId, anchor: .bottom)
+                    }
+                }
+            }
         }
     }
     
