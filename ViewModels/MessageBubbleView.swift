@@ -10,6 +10,9 @@ struct MessageBubbleView: View {
     var onViewportHidden: ((String) -> Void)? = nil
     var onToggleReaction: ((String, String) async -> Void)? = nil
     
+    @ObservedObject private var reactionHistory = ReactionHistoryStore.shared
+    @State private var showReactionPicker = false
+    
     var body: some View {
         HStack {
             if message.isFromMe { Spacer() }
@@ -49,14 +52,20 @@ struct MessageBubbleView: View {
                                 copyToClipboard()
                             }
                             Divider()
-                            ForEach(quickReactionEmojis, id: \.self) { emoji in
-                                Button("Реакция \(emoji)") {
+                            ForEach(reactionHistory.menuEmojis, id: \.self) { emoji in
+                                Button(emoji) {
                                     toggleReaction(emoji)
                                 }
                             }
                             Divider()
-                            Button("Открыть Emoji Picker") {
-                                NSApp.orderFrontCharacterPalette(nil)
+                            Button("Другие реакции...") {
+                                showReactionPicker = true
+                            }
+                        }
+                        .sheet(isPresented: $showReactionPicker) {
+                            ReactionPickerView { emoji in
+                                toggleReaction(emoji)
+                                showReactionPicker = false
                             }
                         }
                 }
@@ -108,10 +117,6 @@ struct MessageBubbleView: View {
         .onDisappear {
             onViewportHidden?(message.id)
         }
-    }
-
-    private var quickReactionEmojis: [String] {
-        ["👍", "❤️", "😂", "😮", "😢", "🙏"]
     }
 
     private func toggleReaction(_ emoji: String) {

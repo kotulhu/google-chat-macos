@@ -217,6 +217,7 @@ struct ChatDetailView: View {
     @State private var stabilizeInitialScrollUntil: Date?
     @State private var mentionQuery: String?
     @State private var inputHeight: CGFloat = 36
+    @State private var isShowingMembers = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -227,19 +228,15 @@ struct ChatDetailView: View {
                 Spacer()
                 
                 if space.type != .direct {
-                    Menu {
-                        if memberEmails.isEmpty {
-                            Text("Нет данных")
-                        } else {
-                            ForEach(memberEmails, id: \.self) { email in
-                                Text(email)
-                            }
-                        }
+                    Button {
+                        isShowingMembers = true
                     } label: {
                         Label("Участники \(memberEmails.count)", systemImage: "person.2")
                     }
-                    .menuStyle(.borderlessButton)
                     .help("Участники чата")
+                    .sheet(isPresented: $isShowingMembers) {
+                        MemberManagementView(space: space, chatVM: chatVM)
+                    }
                 }
             }
             .padding()

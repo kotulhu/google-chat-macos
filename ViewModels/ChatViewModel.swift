@@ -564,7 +564,7 @@ class ChatViewModel: NSObject,ObservableObject {
             }
             
             if let cachedEmail = userEmailCache[user.id], !cachedEmail.isEmpty {
-                result.append(ChatUser(id: user.id, email: cachedEmail, displayName: user.displayName, avatarURL: user.avatarURL))
+                result.append(ChatUser(id: user.id, email: cachedEmail, displayName: user.displayName, avatarURL: user.avatarURL, membershipName: user.membershipName))
                 continue
             }
             
@@ -572,7 +572,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 let email = try await chatService?.fetchUserEmail(userId: user.id) ?? ""
                 if !email.isEmpty {
                     userEmailCache[user.id] = email
-                    result.append(ChatUser(id: user.id, email: email, displayName: user.displayName, avatarURL: user.avatarURL))
+                    result.append(ChatUser(id: user.id, email: email, displayName: user.displayName, avatarURL: user.avatarURL, membershipName: user.membershipName))
                     continue
                 }
             } catch {
@@ -582,6 +582,71 @@ class ChatViewModel: NSObject,ObservableObject {
             result.append(user)
         }
         return result
+    }
+
+    var myUserId: String {
+        currentUserId
+    }
+
+    func searchUsers(query: String) async -> [ChatUser] {
+        guard let service = chatService else { return [] }
+        do {
+            let results = try await service.searchUsers(query: query)
+            return results.filter { $0.id != currentUserId }
+        } catch {
+            print("❌ Ошибка поиска пользователей: \(error)")
+            return []
+        }
+    }
+
+    func addMember(_ user: ChatUser, to spaceId: String) async {
+        guard let service = chatService else { return }
+        do {
+            _ = try await service.createMembership(spaceId: spaceId, userId: user.id)
+            memberCache.removeValue(forKey: spaceId)
+            await loadMembers(for: spaceId)
+        } catch {
+            errorMessage = "Не удалось добавить участника: \(error.localizedDescription)"
+            print("❌ \(errorMessage!)")
+        }
+    }
+
+    func removeMember(_ user: ChatUser, from spaceId: String) async {
+        guard let service = chatService else { return }
+        guard let membershipName = user.membershipName else {
+            errorMessage = "Не удалось удалить участника: нет данных о членстве"
+            return
+        }
+        do {
+            try await service.deleteMembership(membershipName: membershipName)
+            memberCache.removeValue(forKey: spaceId)
+            currentSpaceMembers.removeAll { $0.id == user.id }
+        } catch {
+            errorMessage = "Не удалось удалить участника: \(error.localizedDescription)"
+            print("❌ \(errorMessage!)")
+        }
+    }
+
+    func leaveSpace(_ spaceId: String) async {
+        guard let service = chatService else { return }
+        let myMembership = currentSpaceMembers.first { $0.id == currentUserId }?.membershipName
+        do {
+            if let myMembership {
+                try await service.deleteMembership(membershipName: myMembership)
+            } else {
+                try await service.deleteMembershipByUserId(spaceId: spaceId, userId: currentUserId)
+            }
+            spaces.removeAll { $0.id == spaceId }
+            memberCache.removeValue(forKey: spaceId)
+            if selectedSpace?.id == spaceId {
+                selectedSpace = nil
+                messages = []
+                currentSpaceMembers = []
+            }
+        } catch {
+            errorMessage = "Не удалось покинуть чат: \(error.localizedDescription)"
+            print("❌ \(errorMessage!)")
+        }
     }
 
     @discardableResult
@@ -657,6 +722,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 try await service.removeReaction(reactionId: reactionName)
             } else {
                 _ = try await service.addReaction(messageId: messageId, emoji: emoji)
+                ReactionHistoryStore.shared.record(emoji)
             }
             
             let reactions = try await service.fetchReactions(messageId: messageId)

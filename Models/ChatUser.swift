@@ -5,6 +5,7 @@ struct ChatUser: Identifiable, Hashable, Codable {
     let email: String?
     let displayName: String?
     let avatarURL: URL?
+    var membershipName: String?
     
     var displayTitle: String {
         if let email, !email.isEmpty {

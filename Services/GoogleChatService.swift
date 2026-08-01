@@ -646,6 +646,7 @@ class GoogleChatService {
             let memberships: [Membership]?
         }
         struct Membership: Decodable {
+            let name: String?
             let member: Member?
         }
         struct Member: Decodable {
@@ -665,7 +666,97 @@ class GoogleChatService {
                 id: member.name,
                 email: member.email,
                 displayName: member.displayName,
-                avatarURL: member.avatarUrl.flatMap(URL.init(string:))
+                avatarURL: member.avatarUrl.flatMap(URL.init(string:)),
+                membershipName: membership.name
+            )
+        } ?? []
+    }
+
+    func createMembership(spaceId: String, userId: String) async throws -> String {
+        let url = URL(string: baseURL + "\(spaceId)/members")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["member": ["name": userId]])
+        
+        let (data, response) = try await authorizedData(for: request)
+        try validateHTTPResponse(response, data: data, domain: "GoogleChatMembershipCreate")
+        
+        struct MembershipResponse: Decodable {
+            let name: String
+        }
+        let decoded = try JSONDecoder().decode(MembershipResponse.self, from: data)
+        return decoded.name
+    }
+
+    func deleteMembership(membershipName: String) async throws {
+        let url = URL(string: baseURL + membershipName)!
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        
+        let (data, response) = try await authorizedData(for: request)
+        try validateHTTPResponse(response, data: data, domain: "GoogleChatMembershipDelete")
+    }
+
+    func deleteMembershipByUserId(spaceId: String, userId: String) async throws {
+        let members = try await fetchSpaceMemberUsers(spaceId: spaceId)
+        guard let membershipName = members.first(where: { $0.id == userId })?.membershipName else {
+            throw NSError(domain: "GoogleChatMembershipDelete", code: 404,
+                          userInfo: [NSLocalizedDescriptionKey: "Членство не найдено"])
+        }
+        try await deleteMembership(membershipName: membershipName)
+    }
+
+    func searchUsers(query: String) async throws -> [ChatUser] {
+        var components = URLComponents(string: "https://people.googleapis.com/v1/people:searchContacts")
+        components?.queryItems = [
+            URLQueryItem(name: "query", value: query),
+            URLQueryItem(name: "readMask", value: "names,emailAddresses,photos"),
+            URLQueryItem(name: "pageSize", value: "20")
+        ]
+        guard let url = components?.url else { return [] }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response, data: data, domain: "PeopleSearchContacts")
+        
+        struct SearchResponse: Decodable {
+            let results: [Result]?
+        }
+        struct Result: Decodable {
+            let person: Person?
+        }
+        struct Person: Decodable {
+            let resourceName: String?
+            let names: [Name]?
+            let emailAddresses: [Email]?
+            let photos: [Photo]?
+        }
+        struct Name: Decodable {
+            let displayName: String?
+        }
+        struct Email: Decodable {
+            let value: String?
+        }
+        struct Photo: Decodable {
+            let url: String?
+        }
+        
+        let decoded = try JSONDecoder().decode(SearchResponse.self, from: data)
+        return decoded.results?.compactMap { result in
+            guard let person = result.person,
+                  let resourceName = person.resourceName,
+                  resourceName.hasPrefix("people/") else {
+                return nil
+            }
+            let userId = resourceName.replacingOccurrences(of: "people/", with: "users/")
+            return ChatUser(
+                id: userId,
+                email: person.emailAddresses?.first?.value,
+                displayName: person.names?.first?.displayName,
+                avatarURL: person.photos?.first?.url.flatMap(URL.init(string:))
             )
         } ?? []
     }
