@@ -29,6 +29,8 @@ class ChatViewModel: NSObject,ObservableObject {
     
     private var userEmailCache: [String: String] = [:]
     private var memberCache: [String: [ChatUser]] = [:]
+    private var knownPeopleCache: [String: ChatUser] = [:]
+    private var peopleSearchPrepared = false
     private var reactionCache: [String: [MessageReaction]] = [:]
     private var loadingReactionMessageIds = Set<String>()
     private var userNameCache: [String: String] = [:]
@@ -149,6 +151,7 @@ class ChatViewModel: NSObject,ObservableObject {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self = self, let currentSpace = self.selectedSpace, currentSpace.id == space.id else { return }
             Task {
+                PerfBeacon.mark("Lenta", phase: "pollTick")
                 await self.loadMessages(for: space)
             }
         }
@@ -230,7 +233,9 @@ class ChatViewModel: NSObject,ObservableObject {
     }
     
     func refreshUnreadCounts() async {
+        PerfBeacon.mark("Bg", phase: "refreshUnreadCounts START", detail: "spaces=\(spaces.count)")
         guard let service = chatService else { return }
+        PerfBeacon.start("Bg", phase: "refreshUnreadCounts")
         await withTaskGroup(of: (String, Message?).self) { group in
             for space in spaces {
                 group.addTask {
@@ -263,6 +268,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 }
             }
         }
+        PerfBeacon.end("Bg", phase: "refreshUnreadCounts", detail: "spaces=\(spaces.count)")
         updateDockBadge()
     }
     
@@ -288,11 +294,14 @@ class ChatViewModel: NSObject,ObservableObject {
     }
     
     func loadMessages(for space: ChatSpace) async {
+        PerfBeacon.start("Lenta", phase: "loadMessages")
         guard let service = chatService else { return }
         isLoading = true
         defer { isLoading = false }
         
+        PerfBeacon.start("Lenta", phase: "cacheRead")
         let cachedMessages = MessageCache.shared.get(spaceId: space.id)
+        PerfBeacon.end("Lenta", phase: "cacheRead", detail: "count=\(cachedMessages?.count ?? 0)")
         if let cachedMessages, !cachedMessages.isEmpty {
             for message in cachedMessages where !message.reactions.isEmpty {
                 reactionCache[message.id] = message.reactions
@@ -301,13 +310,16 @@ class ChatViewModel: NSObject,ObservableObject {
         }
         
         do {
+            PerfBeacon.start("Lenta", phase: "fetch")
             let fetchedMessages = try await service.fetchMessages(spaceId: space.id)
+            PerfBeacon.end("Lenta", phase: "fetch", detail: "count=\(fetchedMessages.count)")
             accessToken = service.currentAccessToken
             
             if space.type == .direct {
                 await refreshDirectChatMappingAndName(for: space)
             }
             
+            PerfBeacon.start("Lenta", phase: "buildNames")
             var messagesWithNames: [Message] = []
             for var msg in fetchedMessages {
                 if let senderId = msg.senderId, !msg.isFromMe {
@@ -320,10 +332,16 @@ class ChatViewModel: NSObject,ObservableObject {
                 }
                 messagesWithNames.append(msg)
             }
-            if self.messages != messagesWithNames {
+            PerfBeacon.end("Lenta", phase: "buildNames", detail: "count=\(messagesWithNames.count)")
+            let changed = self.messages != messagesWithNames
+            PerfBeacon.start("Lenta", phase: "assign")
+            if changed {
                 self.messages = messagesWithNames
             }
+            PerfBeacon.end("Lenta", phase: "assign", detail: "changed=\(changed)")
+            PerfBeacon.start("Lenta", phase: "cacheWrite")
             MessageCache.shared.set(messagesWithNames, forSpaceId: space.id)
+            PerfBeacon.end("Lenta", phase: "cacheWrite", detail: "count=\(messagesWithNames.count)")
             
             if let latestMsg = messagesWithNames.last,
                let idx = spaces.firstIndex(where: { $0.id == space.id }) {
@@ -345,6 +363,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 print("⚠️ Не удалось обновить сообщения из сети, показан кэш: \(error)")
             }
         }
+        PerfBeacon.end("Lenta", phase: "loadMessages", detail: space.name)
     }
 
     private func normalizeMessagesForDisplay(_ messages: [Message]) -> [Message] {
@@ -416,12 +435,14 @@ class ChatViewModel: NSObject,ObservableObject {
                 userNameCache[userId] = realName
                 saveCache()
                 await MainActor.run {
-                    for i in self.messages.indices {
-                        if self.messages[i].senderId == userId {
-                            self.messages[i].authorName = realName
+                    PerfBeacon.measure("Lenta", phase: "nameResolutionUpdate", minMs: 1, detail: "messages=\(self.messages.count), sender=\(userId)") {
+                        for i in self.messages.indices {
+                            if self.messages[i].senderId == userId {
+                                self.messages[i].authorName = realName
+                            }
                         }
+                        self.objectWillChange.send()
                     }
-                    self.objectWillChange.send()
                 }
             }
         }
@@ -543,6 +564,9 @@ class ChatViewModel: NSObject,ObservableObject {
             let members = try await service.fetchSpaceMemberUsers(spaceId: spaceId)
             let enrichedMembers = await enrichUsersWithEmails(members)
             memberCache[spaceId] = enrichedMembers
+            for member in enrichedMembers {
+                rememberKnownPerson(member)
+            }
             if selectedSpace?.id == spaceId {
                 currentSpaceMembers = enrichedMembers
             }
@@ -551,6 +575,73 @@ class ChatViewModel: NSObject,ObservableObject {
             if selectedSpace?.id == spaceId {
                 currentSpaceMembers = []
             }
+        }
+    }
+
+    private func rememberKnownPerson(_ user: ChatUser) {
+        guard !user.id.isEmpty, user.id != currentUserId else { return }
+        knownPeopleCache[user.id] = user
+    }
+
+    private func preparePeopleSearch() async {
+        guard !peopleSearchPrepared else { return }
+        peopleSearchPrepared = true
+        
+        if let service = chatService,
+           let contacts = try? await service.fetchAllContacts() {
+            for contact in contacts {
+                rememberKnownPerson(contact)
+            }
+        }
+        
+        guard let service = chatService else { return }
+        let spaceIds = spaces.map { $0.id }
+        let loaded: [String: [ChatUser]] = await withTaskGroup(of: (String, [ChatUser])?.self) { group in
+            for spaceId in spaceIds where memberCache[spaceId] == nil {
+                group.addTask {
+                    guard let members = try? await service.fetchSpaceMemberUsers(spaceId: spaceId) else {
+                        return nil
+                    }
+                    return (spaceId, members)
+                }
+            }
+            var result: [String: [ChatUser]] = [:]
+            for await item in group {
+                if let item {
+                    result[item.0] = item.1
+                }
+            }
+            return result
+        }
+        
+        for (spaceId, members) in loaded {
+            let enriched = await enrichUsersWithEmails(members)
+            memberCache[spaceId] = enriched
+            for member in enriched {
+                rememberKnownPerson(member)
+            }
+        }
+    }
+
+    func searchUsers(query: String) async -> [ChatUser] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let q = trimmed.lowercased()
+        
+        await preparePeopleSearch()
+        
+        let results = knownPeopleCache.values.filter { user in
+            guard user.id != currentUserId else { return false }
+            let email = (user.email ?? "").lowercased()
+            let name = (user.displayName ?? "").lowercased()
+            let id = user.id.lowercased()
+            return email.contains(q) || name.contains(q) || id.contains(q)
+        }
+        
+        return results.sorted {
+            let lhs = $0.email ?? $0.displayTitle
+            let rhs = $1.email ?? $1.displayTitle
+            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
         }
     }
 
@@ -586,17 +677,6 @@ class ChatViewModel: NSObject,ObservableObject {
 
     var myUserId: String {
         currentUserId
-    }
-
-    func searchUsers(query: String) async -> [ChatUser] {
-        guard let service = chatService else { return [] }
-        do {
-            let results = try await service.searchUsers(query: query)
-            return results.filter { $0.id != currentUserId }
-        } catch {
-            print("❌ Ошибка поиска пользователей: \(error)")
-            return []
-        }
     }
 
     func addMember(_ user: ChatUser, to spaceId: String) async {
@@ -687,11 +767,14 @@ class ChatViewModel: NSObject,ObservableObject {
         loadingReactionMessageIds.insert(messageId)
         defer { loadingReactionMessageIds.remove(messageId) }
         
+        PerfBeacon.start("React", phase: force ? "loadReactions(force)" : "loadReactions")
         do {
             let reactions = try await service.fetchReactions(messageId: messageId)
+            PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "count=\(reactions.count), message=\(messageId.suffix(12))")
             reactionCache[messageId] = reactions
             applyReactions(reactions, to: messageId)
         } catch {
+            PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "ERROR")
             guard !isCancellation(error) else {
                 return
             }
@@ -743,8 +826,10 @@ class ChatViewModel: NSObject,ObservableObject {
     private func applyReactions(_ reactions: [MessageReaction], to messageId: String) {
         reactionCache[messageId] = reactions
         if let index = messages.firstIndex(where: { $0.id == messageId }) {
-            messages[index].reactions = reactions
-            objectWillChange.send()
+            PerfBeacon.measure("React", phase: "applyReactions", minMs: 1, detail: "count=\(reactions.count)") {
+                messages[index].reactions = reactions
+                objectWillChange.send()
+            }
         }
     }
 
@@ -867,11 +952,13 @@ class ChatViewModel: NSObject,ObservableObject {
     }
     
     func checkAllSpacesForNewMessages() async {
+        PerfBeacon.mark("Bg", phase: "checkAllSpaces START", detail: "spaces=\(spaces.count)")
         print("🟢 [Check] START: spaces=\(spaces.count), selected=\(selectedSpace?.name ?? "nil"), dedup=\(sentNotificationIds.count)")
         guard let service = chatService else {
             print("🟢 [Check] ABORT: chatService=nil")
             return
         }
+        PerfBeacon.start("Bg", phase: "checkAllSpaces")
         
         var hasNewMessage = false
         for space in spaces {
@@ -931,6 +1018,7 @@ class ChatViewModel: NSObject,ObservableObject {
             }
         }
         if hasNewMessage { sortSpaces() }
+        PerfBeacon.end("Bg", phase: "checkAllSpaces", detail: "spaces=\(spaces.count), hasNew=\(hasNewMessage)")
         print("🟢 [Check] DONE")
     }
 

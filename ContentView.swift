@@ -286,6 +286,7 @@ struct ChatDetailView: View {
                     scrollToInitialMessage(using: proxy)
                 }
                 .onChange(of: chatVM.messages) { _ in
+                    PerfBeacon.mark("Render", phase: "messagesChanged", detail: "count=\(chatVM.messages.count)")
                     scrollToInitialMessage(using: proxy)
                 }
             }
@@ -413,6 +414,7 @@ struct ChatDetailView: View {
         initialScrollTarget = target
         stabilizeInitialScrollUntil = Date().addingTimeInterval(2.5)
         didInitialScroll = true
+        PerfBeacon.mark("Render", phase: "initialScroll", detail: "id=\(target.id.suffix(12))")
         stabilizeInitialScroll(using: proxy)
     }
 

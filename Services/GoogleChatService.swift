@@ -45,7 +45,9 @@ class GoogleChatService {
         request.httpMethod = "GET"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         
+        PerfBeacon.start("Net", phase: "fetchSpaces:network")
         let (data, _) = try await URLSession.shared.data(for: request)
+        PerfBeacon.end("Net", phase: "fetchSpaces:network", detail: "bytes=\(data.count)")
         
         struct SpacesResponse: Decodable {
             let spaces: [SpaceItem]
@@ -56,9 +58,10 @@ class GoogleChatService {
             let spaceType: String
         }
         
+        PerfBeacon.start("Net", phase: "fetchSpaces:decode")
         let response = try JSONDecoder().decode(SpacesResponse.self, from: data)
         
-        return response.spaces.map { space in
+        let result = response.spaces.map { space in
             let type: ChatSpace.SpaceType
             switch space.spaceType {
             case "DM", "DIRECT_MESSAGE": type = .direct
@@ -72,6 +75,8 @@ class GoogleChatService {
                 lastMessage: nil
             )
         }
+        PerfBeacon.end("Net", phase: "fetchSpaces:decode", detail: "count=\(result.count)")
+        return result
     }
     
     func createDirectChat(with userId: String) async throws -> ChatSpace {
@@ -140,7 +145,9 @@ class GoogleChatService {
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        PerfBeacon.start("Net", phase: "fetchMessages:network")
         let (data, _) = try await authorizedData(for: request)
+        PerfBeacon.end("Net", phase: "fetchMessages:network", detail: "bytes=\(data.count)")
         
         struct MessagesResponse: Decodable {
             let messages: [MessageItem]?
@@ -173,6 +180,7 @@ class GoogleChatService {
             let displayName: String?
         }
         
+        PerfBeacon.start("Net", phase: "fetchMessages:decode")
         let decodedResponse = try JSONDecoder().decode(MessagesResponse.self, from: data)
         
         let formatter = ISO8601DateFormatter()
@@ -225,6 +233,7 @@ class GoogleChatService {
             )
         } ?? []
         
+        PerfBeacon.end("Net", phase: "fetchMessages:decode", detail: "count=\(messages.count)")
         return messages
     }
 
@@ -677,7 +686,7 @@ class GoogleChatService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["member": ["name": userId]])
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["member": ["name": userId, "type": "HUMAN"]])
         
         let (data, response) = try await authorizedData(for: request)
         try validateHTTPResponse(response, data: data, domain: "GoogleChatMembershipCreate")
@@ -759,6 +768,69 @@ class GoogleChatService {
                 avatarURL: person.photos?.first?.url.flatMap(URL.init(string:))
             )
         } ?? []
+    }
+
+    func fetchAllContacts() async throws -> [ChatUser] {
+        var result: [ChatUser] = []
+        var pageToken: String?
+        
+        struct ConnectionsResponse: Decodable {
+            let connections: [Person]?
+            let nextPageToken: String?
+        }
+        struct Person: Decodable {
+            let resourceName: String?
+            let names: [Name]?
+            let emailAddresses: [Email]?
+            let photos: [Photo]?
+        }
+        struct Name: Decodable {
+            let displayName: String?
+        }
+        struct Email: Decodable {
+            let value: String?
+        }
+        struct Photo: Decodable {
+            let url: String?
+        }
+        
+        repeat {
+            var components = URLComponents(string: "https://people.googleapis.com/v1/people/me/connections")
+            var items = [
+                URLQueryItem(name: "pageSize", value: "1000"),
+                URLQueryItem(name: "personFields", value: "names,emailAddresses,photos")
+            ]
+            if let pageToken {
+                items.append(URLQueryItem(name: "pageToken", value: pageToken))
+            }
+            components?.queryItems = items
+            guard let url = components?.url else { break }
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validateHTTPResponse(response, data: data, domain: "PeopleConnections")
+            
+            let decoded = try JSONDecoder().decode(ConnectionsResponse.self, from: data)
+            for person in decoded.connections ?? [] {
+                guard let resourceName = person.resourceName,
+                      resourceName.hasPrefix("people/"),
+                      let email = person.emailAddresses?.first?.value, !email.isEmpty else {
+                    continue
+                }
+                let userId = resourceName.replacingOccurrences(of: "people/", with: "users/")
+                result.append(ChatUser(
+                    id: userId,
+                    email: email,
+                    displayName: person.names?.first?.displayName,
+                    avatarURL: person.photos?.first?.url.flatMap(URL.init(string:))
+                ))
+            }
+            pageToken = decoded.nextPageToken
+        } while pageToken != nil
+        
+        return result
     }
 
     func fetchCurrentUserId() async throws -> String {

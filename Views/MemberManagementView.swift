@@ -8,6 +8,7 @@ struct MemberManagementView: View {
     @State private var searchQuery = ""
     @State private var searchResults: [ChatUser] = []
     @State private var isSearching = false
+    @State private var searchTask: Task<Void, Never>?
     
     private var memberIds: Set<String> {
         Set(chatVM.currentSpaceMembers.map { $0.id })
@@ -22,8 +23,12 @@ struct MemberManagementView: View {
             HStack {
                 TextField("Имя или email…", text: $searchQuery)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { runSearch() }
-                Button("Найти") { runSearch() }
+                    .onChange(of: searchQuery) { _ in
+                        scheduleSearch()
+                    }
+                Button("Найти") {
+                    scheduleSearch(immediate: true)
+                }
             }
             
             if isSearching {
@@ -32,6 +37,9 @@ struct MemberManagementView: View {
                     .padding(.vertical, 4)
             } else if !searchQuery.isEmpty && !searchResults.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
+                    Text("Добавить участника")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     ForEach(searchResults) { user in
                         HStack {
                             AvatarImage(url: user.avatarURL, name: user.displayTitle)
@@ -59,24 +67,27 @@ struct MemberManagementView: View {
             
             Divider()
             
-            List {
-                ForEach(chatVM.currentSpaceMembers) { member in
-                    HStack {
-                        AvatarImage(url: member.avatarURL, name: member.displayTitle)
-                            .frame(width: 24, height: 24)
-                        Text(member.displayTitle)
-                            .lineLimit(1)
-                        Spacer()
-                        if member.id == chatVM.myUserId {
-                            Text("Вы")
-                                .foregroundColor(.secondary)
-                        } else {
-                            Button("Удалить", role: .destructive) {
-                                removeMember(member)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(chatVM.currentSpaceMembers) { member in
+                        HStack {
+                            AvatarImage(url: member.avatarURL, name: member.displayTitle)
+                                .frame(width: 24, height: 24)
+                            Text(member.displayTitle)
+                                .lineLimit(1)
+                            Spacer()
+                            if member.id == chatVM.myUserId {
+                                Text("Вы")
+                                    .foregroundColor(.secondary)
+                            } else {
+                                Button("Удалить", role: .destructive) {
+                                    removeMember(member)
+                                }
                             }
                         }
+                        .padding(.vertical, 6)
+                        Divider()
                     }
-                    .padding(.vertical, 2)
                 }
             }
             
@@ -95,16 +106,30 @@ struct MemberManagementView: View {
             }
         }
         .padding()
-        .frame(width: 420, height: 500)
+        .frame(width: 420, height: 520)
+        .onDisappear {
+            searchTask?.cancel()
+        }
     }
     
-    private func runSearch() {
+    private func scheduleSearch(immediate: Bool = false) {
+        searchTask?.cancel()
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return }
-        isSearching = true
-        searchResults = []
-        Task {
-            searchResults = await chatVM.searchUsers(query: query)
+        guard !query.isEmpty else {
+            searchResults = []
+            isSearching = false
+            return
+        }
+        
+        searchTask = Task {
+            if !immediate {
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            guard !Task.isCancelled else { return }
+            isSearching = true
+            let results = await chatVM.searchUsers(query: query)
+            guard !Task.isCancelled else { return }
+            searchResults = results
             isSearching = false
         }
     }

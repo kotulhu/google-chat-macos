@@ -14,6 +14,7 @@ struct MessageBubbleView: View {
     @State private var showReactionPicker = false
     
     var body: some View {
+        PerfBeacon.markRareView("Render", phase: "bubbleBody", detail: "id=\(message.id.suffix(12)), len=\(message.text.count)")
         HStack {
             if message.isFromMe { Spacer() }
             
@@ -35,7 +36,9 @@ struct MessageBubbleView: View {
                 
 
                 if !message.text.isEmpty {
-                    let attributedText = message.text.attributedStringWithLinks(mentionDisplayNames: mentionDisplayNames)
+                    let attributedText = PerfBeacon.measureReturn("Render", phase: "attributed", minMs: 3, detail: "len=\(message.text.count)") {
+                        message.text.attributedStringWithLinks(mentionDisplayNames: mentionDisplayNames)
+                    }
                     Text(attributedText)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -237,6 +240,9 @@ struct AttachmentRow: View {
     private func loadImage() async {
         let cacheKey = imageCacheKey
         if let cachedData = ImageCache.shared.get(forKey: cacheKey) {
+            PerfBeacon.measure("Image", phase: "nsImageDecode", minMs: 3, detail: "cacheHit, bytes=\(cachedData.count)") {
+                _ = NSImage(data: cachedData)
+            }
             if let nsImage = NSImage(data: cachedData) {
                 await MainActor.run {
                     self.imageData = cachedData
@@ -252,10 +258,15 @@ struct AttachmentRow: View {
             return
         }
         
+        PerfBeacon.start("Image", phase: "loadImageData")
         do {
             let data = try await loadImageData()
+            PerfBeacon.end("Image", phase: "loadImageData", detail: "bytes=\(data.count), key=\(cacheKey)")
             if Task.isCancelled { return }
             ImageCache.shared.set(data, forKey: cacheKey)
+            PerfBeacon.measure("Image", phase: "nsImageDecode", minMs: 3, detail: "network, bytes=\(data.count)") {
+                _ = NSImage(data: data)
+            }
             if let nsImage = NSImage(data: data) {
                 await MainActor.run {
                     self.imageData = data
@@ -269,6 +280,7 @@ struct AttachmentRow: View {
                 }
             }
         } catch {
+            PerfBeacon.end("Image", phase: "loadImageData", detail: "ERROR \(error.localizedDescription)")
             if Task.isCancelled { return }
             print("❌ Ошибка загрузки: \(error)")
             await MainActor.run {
