@@ -1069,10 +1069,10 @@ class ChatViewModel: NSObject,ObservableObject {
     
     private func sortSpaces() {
         spaces = spaces.sorted { a, b in
-            let aBucket = a.lastMessageTimestamp.map { Int($0.timeIntervalSince1970 / 300) } ?? -1
-            let bBucket = b.lastMessageTimestamp.map { Int($0.timeIntervalSince1970 / 300) } ?? -1
-            if aBucket != bBucket {
-                return aBucket > bBucket
+            let aTime = a.lastMessageTimestamp ?? .distantPast
+            let bTime = b.lastMessageTimestamp ?? .distantPast
+            if aTime != bTime {
+                return aTime > bTime
             }
             if a.type != b.type {
                 if a.type == .direct { return true }
