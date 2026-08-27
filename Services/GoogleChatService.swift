@@ -1,5 +1,10 @@
 import Foundation
 
+/// Wraps the Google Chat REST API and the related People API calls.
+///
+/// All network work pulls the current bearer token from `authManager`
+/// (refreshing it once on a 401), and the playback is instrumented with
+/// `PerfBeacon` so slow phases show up in the console.
 class GoogleChatService {
     private var accessToken: String
     private let baseURL = "https://chat.googleapis.com/v1/"
@@ -15,10 +20,13 @@ class GoogleChatService {
         self.currentUserName = currentUserName
     }
     
+    /// The token currently in use (may be updated after background refresh).
     var currentAccessToken: String {
         accessToken
     }
 
+    /// Sends a request with a Bearer header; on a 401 it refreshes the token
+    /// once and retries, then returns the raw data and response.
     private func authorizedData(for request: URLRequest, retryOnUnauthorized: Bool = true) async throws -> (Data, URLResponse) {
         var request = request
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -27,7 +35,7 @@ class GoogleChatService {
         if retryOnUnauthorized,
            let httpResponse = response as? HTTPURLResponse,
            httpResponse.statusCode == 401 {
-            print("🔄 401 Unauthorized, пробуем обновить токен...")
+            print("🔄 401 Unauthorized, refreshing token...")
             let refreshed = await authManager?.refreshAccessToken() ?? false
             guard refreshed, let newToken = authManager?.accessToken else {
                 throw NSError(domain: "Auth", code: 401, userInfo: [NSLocalizedDescriptionKey: "Token expired and refresh failed"])
@@ -39,6 +47,8 @@ class GoogleChatService {
         return (data, response)
     }
     
+    /// Fetches all spaces for the connected user and maps them to `ChatSpace`,
+    /// translating the API spaceType into the internal enum.
     func fetchSpaces() async throws -> [ChatSpace] {
         let url = URL(string: baseURL + "spaces")!
         var request = URLRequest(url: url)
@@ -70,7 +80,7 @@ class GoogleChatService {
             }
             return ChatSpace(
                 id: space.name,
-                name: space.displayName ?? "Без названия",
+                name: space.displayName ?? L.str("space.unnamed"),
                 type: type,
                 lastMessage: nil
             )
@@ -79,6 +89,7 @@ class GoogleChatService {
         return result
     }
     
+    /// Creates a 1:1 direct chat with the given user.
     func createDirectChat(with userId: String) async throws -> ChatSpace {
         let body: [String: Any] = [
             "spaceType": "DM",
@@ -87,6 +98,7 @@ class GoogleChatService {
         return try await createSpaceRequest(body: body)
     }
     
+    /// Creates a channel or group chat from a display name and internal type.
     func createSpace(name: String, type: ChatSpace.SpaceType) async throws -> ChatSpace {
         let apiType: String
         switch type {
@@ -105,6 +117,7 @@ class GoogleChatService {
         return try await createSpaceRequest(body: body)
     }
     
+    /// Shared POST /spaces machinery used by both creation paths.
     private func createSpaceRequest(body: [String: Any]) async throws -> ChatSpace {
         let url = URL(string: baseURL + "spaces")!
         var request = URLRequest(url: url)
@@ -131,7 +144,7 @@ class GoogleChatService {
         default:
             type = .channel
         }
-        return ChatSpace(id: created.name, name: created.displayName ?? "Без названия", type: type, lastMessage: nil)
+        return ChatSpace(id: created.name, name: created.displayName ?? L.str("space.unnamed"), type: type, lastMessage: nil)
     }
     
     func fetchMessages(spaceId: String, pageSize: Int = 100) async throws -> [Message] {
@@ -254,11 +267,13 @@ class GoogleChatService {
         return "Native Mac Client"
     }
 
+    /// Whether a name is meaningful enough to display (not empty and not a known
+    /// placeholder value).
     private func isUsablePersonName(_ name: String?) -> Bool {
         guard let name else { return false }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        return trimmed != "Native Mac Client" && trimmed != "Пользователь"
+        return trimmed != "Native Mac Client" && trimmed != L.str("user.unknown")
     }
 
     private func isCurrentClientDisplayName(_ name: String?) -> Bool {
@@ -293,11 +308,12 @@ class GoogleChatService {
         let body: [String: Any] = ["text": text]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (_, _) = try await URLSession.shared.data(for: request)
-        print("📤 Сообщение отправлено")
+        print("📤 Message sent")
     }
     
+    /// Looks up a user's display name through the People API.
     func fetchUserName(userId: String) async throws -> String {
-        print("📡 Запрашиваем имя для userId: \(userId)")
+        print("📡 Requesting name for userId: \(userId)")
         let url = URL(string: "https://people.googleapis.com/v1/\(userId)?personFields=names")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -305,11 +321,11 @@ class GoogleChatService {
         let (data, response) = try await URLSession.shared.data(for: request)
         
         if let httpResponse = response as? HTTPURLResponse {
-            print("📡 HTTP статус: \(httpResponse.statusCode)")
+            print("📡 HTTP status: \(httpResponse.statusCode)")
         }
         
-        let rawResponse = String(data: data, encoding: .utf8) ?? "нет данных"
-        print("📡 Сырой ответ People API: \(rawResponse)")
+        let rawResponse = String(data: data, encoding: .utf8) ?? "no data"
+        print("📡 Raw People API response: \(rawResponse)")
         
         struct ProfileResponse: Decodable {
             let names: [Name]?
@@ -320,15 +336,16 @@ class GoogleChatService {
         
         do {
             let response = try JSONDecoder().decode(ProfileResponse.self, from: data)
-            let displayName = response.names?.first?.displayName ?? "Пользователь"
-            print("✅ Имя получено: \(displayName)")
+            let displayName = response.names?.first?.displayName ?? L.str("user.unknown")
+            print("✅ Name received: \(displayName)")
             return displayName
         } catch {
-            print("❌ Ошибка декодирования: \(error)")
-            return "Пользователь"
+            print("❌ Decoding error: \(error)")
+            return L.str("user.unknown")
         }
     }
     
+    /// Uploads a local file as an attachment and returns the upload token.
     func uploadFile(fileURL: URL, to spaceId: String) async throws -> String {
         let fileData = try Data(contentsOf: fileURL)
         let fileName = fileURL.lastPathComponent
@@ -377,6 +394,7 @@ class GoogleChatService {
         return uploadToken
     }
 
+    /// Guesses a MIME type from a file name's extension.
     private func guessMimeType(from fileName: String) -> String {
         let ext = (fileName as NSString).pathExtension.lowercased()
         switch ext {
@@ -391,6 +409,7 @@ class GoogleChatService {
         }
     }
     
+    /// Posts a message with attachment data refs built from upload tokens.
     func sendMessageWithAttachments(spaceId: String, text: String, attachmentUploadTokens: [String]) async throws {
         let url = URL(string: "\(baseURL)\(spaceId)/messages")!
         var request = URLRequest(url: url)
@@ -420,6 +439,7 @@ class GoogleChatService {
         }
     }
 
+    /// Fetches all reactions of a message across pages, aggregated by emoji.
     func fetchReactions(messageId: String) async throws -> [MessageReaction] {
         var allReactions: [ReactionItem] = []
         var pageToken: String?
@@ -446,6 +466,7 @@ class GoogleChatService {
         return aggregateReactions(allReactions)
     }
 
+    /// Adds the current user's reaction (emoji) to a message.
     func addReaction(messageId: String, emoji: String) async throws -> MessageReaction {
         let trimmedEmoji = emoji.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedEmoji.isEmpty else { throw URLError(.badURL) }
@@ -468,6 +489,7 @@ class GoogleChatService {
         )
     }
 
+    /// Removes a reaction by its reaction resource name.
     func removeReaction(reactionId: String) async throws {
         guard let url = URL(string: "\(baseURL)\(reactionId)") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
@@ -496,6 +518,8 @@ class GoogleChatService {
         let unicode: String?
     }
 
+    /// Groups raw reaction items by emoji into aggregated `MessageReaction`
+    /// values, marking the current user's participation.
     private func aggregateReactions(_ reactions: [ReactionItem]) -> [MessageReaction] {
         var grouped: [String: [ReactionItem]] = [:]
         for reaction in reactions {
@@ -535,6 +559,7 @@ class GoogleChatService {
         }
     }
     
+    /// Looks up a user's display name through the Chat API's user resource.
     func fetchUserNameViaChatAPI(userId: String) async throws -> String {
         let url = URL(string: "https://chat.googleapis.com/v1/\(userId)")!
         var request = URLRequest(url: url)
@@ -549,13 +574,14 @@ class GoogleChatService {
         
         do {
             let response = try JSONDecoder().decode(UserResponse.self, from: data)
-            return response.displayName ?? "Пользователь"
+            return response.displayName ?? L.str("user.unknown")
         } catch {
-            print("❌ Chat API не вернул имя: \(error)")
-            return "Пользователь"
+            print("❌ Chat API did not return a name: \(error)")
+            return L.str("user.unknown")
         }
     }
     
+    /// Downloads attachment bytes by resource name through the media API.
     func downloadAttachment(resourceName: String) async throws -> Data {
         let urlString = "https://chat.googleapis.com/v1/media/\(resourceName)?alt=media"
         guard let url = URL(string: urlString) else {
@@ -574,11 +600,13 @@ class GoogleChatService {
         return data
     }
     
+    /// Updates the token used for subsequent API calls.
     func updateToken(_ newToken: String) {
         self.accessToken = newToken
-        print("🔧 Токен в GoogleChatService обновлён")
+        print("🔧 Token updated in GoogleChatService")
     }
 
+    /// Updates the service's view of the current user (id/email/name).
     func updateCurrentUser(id: String? = nil, email: String? = nil, name: String? = nil) {
         if let id, !id.isEmpty {
             self.currentUserId = id.replacingOccurrences(of: "people/", with: "users/")
@@ -591,6 +619,7 @@ class GoogleChatService {
         }
     }
     
+    /// Looks up a user's primary e-mail address through the People API.
     func fetchUserEmail(userId: String) async throws -> String {
         let cleanId = userId.replacingOccurrences(of: "users/", with: "")
         let url = URL(string: "https://people.googleapis.com/v1/people/\(cleanId)?personFields=emailAddresses")!
@@ -611,6 +640,7 @@ class GoogleChatService {
         return email
     }
     
+    /// Returns the raw `users/...` member IDs of a space.
     func fetchSpaceMembers(spaceId: String) async throws -> [String] {
         print("📡 fetchSpaceMembers for spaceId: \(spaceId)")
         let url = URL(string: baseURL + "\(spaceId)/members")!
@@ -620,10 +650,10 @@ class GoogleChatService {
         
         let (data, response) = try await URLSession.shared.data(for: request)
         if let httpResponse = response as? HTTPURLResponse {
-            print("📡 HTTP статус fetchSpaceMembers: \(httpResponse.statusCode)")
+            print("📡 HTTP status fetchSpaceMembers: \(httpResponse.statusCode)")
         }
-        let raw = String(data: data, encoding: .utf8) ?? "нет данных"
-        print("📡 Ответ fetchSpaceMembers: \(raw.prefix(500))")
+        let raw = String(data: data, encoding: .utf8) ?? "no data"
+        print("📡 fetchSpaceMembers response: \(raw.prefix(500))")
         
         struct MembersResponse: Decodable {
             let memberships: [Membership]
@@ -637,10 +667,11 @@ class GoogleChatService {
         
         let responses = try JSONDecoder().decode(MembersResponse.self, from: data)
         let userIds = responses.memberships.map { $0.member.name }
-        print("📡 Участники: \(userIds)")
+        print("📡 Members: \(userIds)")
         return userIds
     }
 
+    /// Returns the `ChatUser` objects of a space, including membership names.
     func fetchSpaceMemberUsers(spaceId: String) async throws -> [ChatUser] {
         print("📡 fetchSpaceMemberUsers for spaceId: \(spaceId)")
         let url = URL(string: baseURL + "\(spaceId)/members")!
@@ -681,6 +712,7 @@ class GoogleChatService {
         } ?? []
     }
 
+    /// Adds a user as a member of a space and returns the created membership name.
     func createMembership(spaceId: String, userId: String) async throws -> String {
         let url = URL(string: baseURL + "\(spaceId)/members")!
         var request = URLRequest(url: url)
@@ -698,6 +730,7 @@ class GoogleChatService {
         return decoded.name
     }
 
+    /// Deletes a membership by its resource name.
     func deleteMembership(membershipName: String) async throws {
         let url = URL(string: baseURL + membershipName)!
         var request = URLRequest(url: url)
@@ -707,15 +740,20 @@ class GoogleChatService {
         try validateHTTPResponse(response, data: data, domain: "GoogleChatMembershipDelete")
     }
 
+    /// Deletes a membership by looking up the user's membership name in the space.
     func deleteMembershipByUserId(spaceId: String, userId: String) async throws {
         let members = try await fetchSpaceMemberUsers(spaceId: spaceId)
         guard let membershipName = members.first(where: { $0.id == userId })?.membershipName else {
             throw NSError(domain: "GoogleChatMembershipDelete", code: 404,
-                          userInfo: [NSLocalizedDescriptionKey: "Членство не найдено"])
+                          userInfo: [NSLocalizedDescriptionKey: L.str("membership.notFound")])
         }
         try await deleteMembership(membershipName: membershipName)
     }
 
+    /// Searches the user's contacts through the People searchContacts endpoint.
+    ///
+    /// Note: the current UI performs local substring search over `fetchAllContacts`
+    /// and space members instead; this method is kept for completeness.
     func searchUsers(query: String) async throws -> [ChatUser] {
         var components = URLComponents(string: "https://people.googleapis.com/v1/people:searchContacts")
         components?.queryItems = [
@@ -770,6 +808,7 @@ class GoogleChatService {
         } ?? []
     }
 
+    /// Loads the full contact list (paginated) with e-mails, names and photos.
     func fetchAllContacts() async throws -> [ChatUser] {
         var result: [ChatUser] = []
         var pageToken: String?
@@ -833,6 +872,7 @@ class GoogleChatService {
         return result
     }
 
+    /// Resolves the current user's People resource name (`people/...`).
     func fetchCurrentUserId() async throws -> String {
         let url = URL(string: "https://people.googleapis.com/v1/people/me?personFields=metadata")!
         var request = URLRequest(url: url)
@@ -845,6 +885,7 @@ class GoogleChatService {
         return response.resourceName
     }
     
+    /// Throws a descriptive error when the HTTP response is not a 2xx status.
     private func validateHTTPResponse(_ response: URLResponse, data: Data, domain: String) throws {
         guard let httpResponse = response as? HTTPURLResponse,
               (200..<300).contains(httpResponse.statusCode) else {

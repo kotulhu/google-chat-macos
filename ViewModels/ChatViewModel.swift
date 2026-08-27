@@ -4,11 +4,16 @@ import UserNotifications
 
 @MainActor
 class ChatViewModel: NSObject,ObservableObject {
+    /// Spaces shown in the sidebar, sorted by recent activity.
     @Published var spaces: [ChatSpace] = []
+    /// Messages of the currently selected space.
     @Published var messages: [Message] = []
+    /// The currently open chat.
     @Published var selectedSpace: ChatSpace?
     @Published var isLoading = false
+    /// Latest user-facing error message (localized by `L`).
     @Published var errorMessage: String?
+    /// Members of `selectedSpace`.
     @Published var currentSpaceMembers: [ChatUser] = []
     
     private var chatService: GoogleChatService?
@@ -66,6 +71,8 @@ class ChatViewModel: NSObject,ObservableObject {
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// Applies a changed local display name to the service and to any messages
+    /// authored by the current user, then notifies observers.
     @objc private func localDisplayNameDidChange() {
         currentUserName = ConfigManager.shared.localDisplayName
         chatService?.updateCurrentUser(name: currentUserDisplayName)
@@ -75,77 +82,90 @@ class ChatViewModel: NSObject,ObservableObject {
         }
         objectWillChange.send()
     }
+    /// Resolves the current user's People API ID via the service, normalizes it
+    /// to the `users/` form and stores it for ownership checks.
     func setCurrentUserId() async {
         do {
             let peopleId = try await chatService?.fetchCurrentUserId() ?? ""
             currentUserId = peopleId.replacingOccurrences(of: "people/", with: "users/")
             chatService?.updateCurrentUser(id: currentUserId)
-            print("✅ Текущий пользователь ID: \(currentUserId)")
+            print("✅ Current user ID: \(currentUserId)")
         } catch {
-            print("❌ Не удалось получить ID текущего пользователя: \(error)")
+            print("❌ Failed to get current user ID: \(error)")
         }
     }
     
+    /// Restores the persisted direct-chat → user mapping from UserDefaults.
     private func loadMapping() {
         directChatUserMapping = defaults.dictionary(forKey: mappingKey) as? [String: String] ?? [:]
         print("DEBUG: mapping loaded from UserDefaults: \(directChatUserMapping)")
     }
 
+    /// Persists the direct-chat → user mapping only when it actually changed.
     private func saveMapping() {
         let currentMapping = defaults.dictionary(forKey: mappingKey) as? [String: String] ?? [:]
         if currentMapping != directChatUserMapping {
             defaults.set(directChatUserMapping, forKey: mappingKey)
-            print("DEBUG: mapping saved (только при изменении)")
+            print("DEBUG: mapping saved")
         }
     }
     
+    /// Restores the persisted user-name resolution cache.
     private func loadCache() {
         userNameCache = cacheDefaults.dictionary(forKey: userNameCacheKey) as? [String: String] ?? [:]
         print("DEBUG: user name cache loaded: \(userNameCache)")
     }
 
+    /// Persists the user-name resolution cache to UserDefaults.
     private func saveCache() {
         cacheDefaults.set(userNameCache, forKey: userNameCacheKey)
     }
 
+    /// Fetches and caches the current user ID, then refreshes direct-chat
+    /// names now that the user identity is known.
     func fetchCurrentUserId() async {
         guard let service = chatService else { return }
         do {
             currentUserId = try await service.fetchCurrentUserId()
             currentUserId = currentUserId.replacingOccurrences(of: "people/", with: "users/")
             chatService?.updateCurrentUser(id: currentUserId)
-            print("✅ Текущий пользователь ID: \(currentUserId)")
+            print("✅ Current user ID: \(currentUserId)")
         } catch {
-            print("❌ Ошибка получения ID: \(error)")
+            print("❌ Failed to get ID: \(error)")
         }
         await refreshDirectChatMappingsAndNames()
     }
     
+    /// Schedules periodic access-token refresh (every 50 minutes) and pushes
+    /// each refreshed token into the service.
     func startTokenRefreshTimer(authManager: GoogleAuthManager) {
         tokenRefreshTimer?.invalidate()
-        print("⏰ Запуск таймера обновления токена (каждые 50 минут)")
+        print("⏰ Starting token refresh timer (every 50 minutes)")
         tokenRefreshTimer = Timer.scheduledTimer(withTimeInterval: 50 * 60, repeats: true) { _ in
-            print("🔄 Таймер сработал, обновляем токен...")
+            print("🔄 Timer fired, refreshing token...")
             Task {
                 let success = await authManager.refreshAccessToken()
                 if success {
                     await MainActor.run {
                         let token = authManager.accessToken
-                        print("✅ Токен обновлён, новый токен: \(token.prefix(50))...")
+                        print("✅ Token refreshed, new token: \(token.prefix(50))...")
                         self.accessToken = token
                         self.chatService?.updateToken(token)
                     }
                 } else {
-                    print("❌ Не удалось обновить токен")
+                    print("❌ Failed to refresh token")
                 }
             }
         }
     }
 
+    /// Cancels the token refresh timer.
     func stopTokenRefreshTimer() {
         tokenRefreshTimer?.invalidate()
         tokenRefreshTimer = nil
     }
+    /// Starts the 5-second message poll for the given space (only while the
+    /// space stays selected) and resumes reaction viewport tracking.
     func startPolling(for space: ChatSpace) {
         stopPolling()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
@@ -159,13 +179,16 @@ class ChatViewModel: NSObject,ObservableObject {
         print("🔄 [Poll] startPolling for: \(space.name), backgroundCheckTimer=\(backgroundCheckTimer != nil ? "running" : "NOT running")")
     }
 
+    /// Stops the current space poll and reaction viewport tracking.
     func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
         reactionViewportController.stop()
-        print("🛑 Остановка polling")
+        print("🛑 Polling stopped")
     }
     
+    /// Binds the view model to an access token and auth manager, builds the
+    /// chat service, resets transient caches and starts background refresh.
     func configure(with token: String, authManager: GoogleAuthManager) {
         self.accessToken = token
         self.currentUserEmail = authManager.userEmail
@@ -178,10 +201,10 @@ class ChatViewModel: NSObject,ObservableObject {
             currentUserEmail: authManager.userEmail,
             currentUserName: currentUserName
         )
-        print("🔧 ChatViewModel сконфигурирован")
+        print("🔧 ChatViewModel configured")
         
         sentNotificationIds.removeAll()
-        print("🧹 sentNotificationIds очищен")
+        print("🧹 sentNotificationIds cleared")
         Task {
             await setCurrentUserId()
         }
@@ -189,10 +212,13 @@ class ChatViewModel: NSObject,ObservableObject {
         startBackgroundRefresh()
     }
     
+    /// Loads all spaces from the API, sorts them, wires background checks,
+    /// resolves direct-chat names, refreshes unread counts and selects the
+    /// first space so its messages load immediately.
     func loadSpaces() async {
-        print("📡 loadSpaces() начат")
+        print("📡 loadSpaces() started")
         guard let service = chatService else {
-            print("❌ chatService = nil (токен не передан)")
+            print("❌ chatService = nil (no token passed)")
             return
         }
         isLoading = true
@@ -201,7 +227,7 @@ class ChatViewModel: NSObject,ObservableObject {
         do {
             let fetchedSpaces = try await service.fetchSpaces()
             
-            print("✅ Получено \(fetchedSpaces.count) чатов")
+            print("✅ Fetched \(fetchedSpaces.count) chats")
             self.spaces = fetchedSpaces
             sortSpaces()
             startBackgroundCheck()
@@ -227,11 +253,13 @@ class ChatViewModel: NSObject,ObservableObject {
                 await loadMessages(for: first)
             }
         } catch {
-            errorMessage = "Ошибка загрузки чатов: \(error.localizedDescription)"
+            errorMessage = L.str("err.load.chats", error.localizedDescription)
             print("❌ \(errorMessage!)")
         }
     }
     
+    /// Fetches the newest message of every space in parallel to update the
+    /// sidebar timestamps, unread badges and the dock badge.
     func refreshUnreadCounts() async {
         PerfBeacon.mark("Bg", phase: "refreshUnreadCounts START", detail: "spaces=\(spaces.count)")
         guard let service = chatService else { return }
@@ -272,6 +300,7 @@ class ChatViewModel: NSObject,ObservableObject {
         updateDockBadge()
     }
     
+    /// Starts the 30-second unread-count background refresh.
     func startBackgroundRefresh() {
         backgroundTimer?.invalidate()
         backgroundTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
@@ -279,11 +308,13 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
+    /// Stops the unread-count background refresh.
     func stopBackgroundRefresh() {
         backgroundTimer?.invalidate()
         backgroundTimer = nil
     }
     
+    /// Returns a cached user name synchronously; falls back to a short-ID label.
     func getUserNameSync(userId: String) -> String {
         if let cached = userNameCache[userId], isUsablePersonName(cached) {
             return cached
@@ -293,6 +324,9 @@ class ChatViewModel: NSObject,ObservableObject {
         return "User \(shortId)"
     }
     
+    /// Loads the messages of a space (cache first, then network), assigns
+    /// resolved author names and reactions, updates the space timestamp, and
+    /// re-sorts the list when a newer message arrived.
     func loadMessages(for space: ChatSpace) async {
         PerfBeacon.start("Lenta", phase: "loadMessages")
         guard let service = chatService else { return }
@@ -357,15 +391,17 @@ class ChatViewModel: NSObject,ObservableObject {
             
         } catch {
             if cachedMessages?.isEmpty != false {
-                errorMessage = "Ошибка загрузки сообщений: \(error.localizedDescription)"
+                errorMessage = L.str("err.load.messages", error.localizedDescription)
                 print("❌ \(errorMessage!)")
             } else {
-                print("⚠️ Не удалось обновить сообщения из сети, показан кэш: \(error)")
+                print("⚠️ Could not refresh messages from network, showing cache: \(error)")
             }
         }
         PerfBeacon.end("Lenta", phase: "loadMessages", detail: space.name)
     }
 
+    /// Rewrites messages authored by the legacy "Native Mac Client" marker so
+    /// they read as coming from the current user.
     private func normalizeMessagesForDisplay(_ messages: [Message]) -> [Message] {
         messages.map { message in
             guard message.authorName.trimmingCharacters(in: .whitespacesAndNewlines) == "Native Mac Client" else {
@@ -385,6 +421,7 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
     
+    /// Sends a plain text message to the selected space and reloads messages.
     @discardableResult
     func sendMessage(_ text: String) async -> Bool {
         guard let service = chatService, let space = selectedSpace else { return false }
@@ -393,12 +430,13 @@ class ChatViewModel: NSObject,ObservableObject {
             await loadMessages(for: space)
             return true
         } catch {
-            errorMessage = "Ошибка отправки: \(error.localizedDescription)"
+            errorMessage = L.str("err.send", error.localizedDescription)
             print("❌ \(errorMessage!)")
             return false
         }
     }
     
+    /// Resets all caches and stops every background task (used on sign-out).
     func clearData() {
         spaces = []
         messages = []
@@ -414,10 +452,12 @@ class ChatViewModel: NSObject,ObservableObject {
         reactionCache.removeAll()
         loadingReactionMessageIds.removeAll()
         updateDockBadge()
-        print("🧹 Данные очищены")
+        print("🧹 Data cleared")
     }
     
 
+    /// Returns the cached display name for a user, or a short-ID fallback while
+    /// the real name is being resolved asynchronously in the background.
     func getUserName(userId: String) -> String {
         if let cached = userNameCache[userId], isUsablePersonName(cached) {
             return cached
@@ -450,6 +490,8 @@ class ChatViewModel: NSObject,ObservableObject {
         return fallback
     }
 
+    /// Best-effort display name for the current user: local override, Google
+    /// account name, e-mail, user ID, and finally the legacy marker.
     private var currentUserDisplayName: String {
         let localDisplayName = ConfigManager.shared.localDisplayName
         if isUsablePersonName(localDisplayName) {
@@ -467,22 +509,27 @@ class ChatViewModel: NSObject,ObservableObject {
         return "Native Mac Client"
     }
 
+    /// Returns whether a name is meaningful enough to display (not empty, not a
+    /// known placeholder like "Native Mac Client" or the localized unknown-user
+    /// fallback).
     private func isUsablePersonName(_ name: String?) -> Bool {
         guard let name else { return false }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        return trimmed != "Native Mac Client" && trimmed != "Пользователь"
+        return trimmed != "Native Mac Client" && trimmed != L.str("user.unknown")
     }
     
+    /// Resolves a user's display name, trying the Chat API first and the People
+    /// API e-mail as a fallback, ending with a short-ID label.
     private func fetchUserRealName(userId: String) async -> String {
         do {
             let name = try await chatService?.fetchUserNameViaChatAPI(userId: userId) ?? ""
             if isUsablePersonName(name) {
-                print("✅ Имя из Chat API: \(name) для \(userId)")
+                print("✅ Name from Chat API: \(name) for \(userId)")
                 return name
             }
         } catch {
-            print("⚠️ Chat API не дал имя для \(userId): \(error)")
+            print("⚠️ Chat API returned no name for \(userId): \(error)")
         }
 
         do {
@@ -491,18 +538,20 @@ class ChatViewModel: NSObject,ObservableObject {
                 return email
             }
         } catch {
-            print("⚠️ People API не дал email для \(userId): \(error)")
+            print("⚠️ People API returned no email for \(userId): \(error)")
         }
 
         let shortId = userId.replacingOccurrences(of: "users/", with: "").suffix(6)
         return "User \(shortId)"
     }
     
+    /// Uploads a file attachment to the service for the given space.
     func uploadFile(fileURL: URL, to spaceId: String) async throws -> String {
         guard let service = chatService else { throw NSError(domain: "Chat", code: 0, userInfo: [NSLocalizedDescriptionKey: "Service not configured"]) }
         return try await service.uploadFile(fileURL: fileURL, to: spaceId)
     }
 
+    /// Creates a new space, inserts it at the top of the list and opens it.
     func createSpace(name: String, type: ChatSpace.SpaceType) async -> Bool {
         guard let service = chatService else { return false }
         do {
@@ -512,12 +561,13 @@ class ChatViewModel: NSObject,ObservableObject {
             await loadMessages(for: created)
             return true
         } catch {
-            errorMessage = "Ошибка создания чата: \(error.localizedDescription)"
+            errorMessage = L.str("err.create.chat", error.localizedDescription)
             print("❌ \(errorMessage!)")
             return false
         }
     }
 
+    /// Opens (or creates) a direct chat with a user, selecting it for display.
     func openDirectChat(with userId: String) async {
         guard let service = chatService else { return }
         
@@ -546,11 +596,13 @@ class ChatViewModel: NSObject,ObservableObject {
             selectedSpace = created
             await loadMessages(for: created)
         } catch {
-            errorMessage = "Ошибка открытия личного чата: \(error.localizedDescription)"
+            errorMessage = L.str("err.open.chat", error.localizedDescription)
             print("❌ \(errorMessage!)")
         }
     }
 
+    /// Loads the members of a space (cached after the first call) and populates
+    /// the shared known-people cache for search.
     func loadMembers(for spaceId: String) async {
         if let cached = memberCache[spaceId] {
             if selectedSpace?.id == spaceId {
@@ -571,18 +623,21 @@ class ChatViewModel: NSObject,ObservableObject {
                 currentSpaceMembers = enrichedMembers
             }
         } catch {
-            print("❌ Ошибка загрузки участников: \(error)")
+            print("❌ Failed to load members: \(error)")
             if selectedSpace?.id == spaceId {
                 currentSpaceMembers = []
             }
         }
     }
 
+    /// Indexes a user into the local searchable cache (skipping the current user).
     private func rememberKnownPerson(_ user: ChatUser) {
         guard !user.id.isEmpty, user.id != currentUserId else { return }
         knownPeopleCache[user.id] = user
     }
 
+    /// One-time warm-up of the search index: loads the full contact list plus the
+    /// members of every space (in parallel), enriching each user with e-mails.
     private func preparePeopleSearch() async {
         guard !peopleSearchPrepared else { return }
         peopleSearchPrepared = true
@@ -623,6 +678,7 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
+    /// Searches the local index of known people by e-mail, name or user ID.
     func searchUsers(query: String) async -> [ChatUser] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
@@ -645,6 +701,8 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
+    /// Fills missing e-mails for a list of users using the cached values or the
+    /// People API, so display and search can rely on e-mail addresses.
     private func enrichUsersWithEmails(_ users: [ChatUser]) async -> [ChatUser] {
         var result: [ChatUser] = []
         for user in users {
@@ -667,7 +725,7 @@ class ChatViewModel: NSObject,ObservableObject {
                     continue
                 }
             } catch {
-                print("⚠️ Не удалось получить email для \(user.id): \(error)")
+                print("⚠️ Could not get email for \(user.id): \(error)")
             }
             
             result.append(user)
@@ -675,10 +733,12 @@ class ChatViewModel: NSObject,ObservableObject {
         return result
     }
 
+    /// The resolved API ID of the current user (`users/...`).
     var myUserId: String {
         currentUserId
     }
 
+    /// Adds a user as a member of a space and refreshes the member list.
     func addMember(_ user: ChatUser, to spaceId: String) async {
         guard let service = chatService else { return }
         do {
@@ -686,15 +746,16 @@ class ChatViewModel: NSObject,ObservableObject {
             memberCache.removeValue(forKey: spaceId)
             await loadMembers(for: spaceId)
         } catch {
-            errorMessage = "Не удалось добавить участника: \(error.localizedDescription)"
+            errorMessage = L.str("err.add.member", error.localizedDescription)
             print("❌ \(errorMessage!)")
         }
     }
 
+    /// Removes a user from a space and updates the local member list.
     func removeMember(_ user: ChatUser, from spaceId: String) async {
         guard let service = chatService else { return }
         guard let membershipName = user.membershipName else {
-            errorMessage = "Не удалось удалить участника: нет данных о членстве"
+            errorMessage = L.str("err.remove.member.noData")
             return
         }
         do {
@@ -702,11 +763,12 @@ class ChatViewModel: NSObject,ObservableObject {
             memberCache.removeValue(forKey: spaceId)
             currentSpaceMembers.removeAll { $0.id == user.id }
         } catch {
-            errorMessage = "Не удалось удалить участника: \(error.localizedDescription)"
+            errorMessage = L.str("err.remove.member", error.localizedDescription)
             print("❌ \(errorMessage!)")
         }
     }
 
+    /// Makes the current user leave a space and clears it from the UI.
     func leaveSpace(_ spaceId: String) async {
         guard let service = chatService else { return }
         let myMembership = currentSpaceMembers.first { $0.id == currentUserId }?.membershipName
@@ -724,11 +786,13 @@ class ChatViewModel: NSObject,ObservableObject {
                 currentSpaceMembers = []
             }
         } catch {
-            errorMessage = "Не удалось покинуть чат: \(error.localizedDescription)"
+            errorMessage = L.str("err.leave.chat", error.localizedDescription)
             print("❌ \(errorMessage!)")
         }
     }
 
+    /// Sends a message, optionally with uploaded attachments, then reloads the
+    /// space so the new message appears immediately.
     @discardableResult
     func sendMessage(_ text: String, attachments: [String] = []) async -> Bool {
         guard let service = chatService, let space = selectedSpace else { return false }
@@ -741,20 +805,25 @@ class ChatViewModel: NSObject,ObservableObject {
             await loadMessages(for: space)
             return true
         } catch {
-            errorMessage = "Ошибка отправки: \(error.localizedDescription)"
+            errorMessage = L.str("err.send", error.localizedDescription)
             print("❌ \(errorMessage!)")
             return false
         }
     }
 
+    /// Notifies the reaction viewport controller that a message became visible
+    /// (so lazy reaction loading can trigger).
     func markReactionViewportVisible(id: String) {
         reactionViewportController.markVisible(id: id)
     }
 
+    /// Notifies the reaction viewport controller that a message left the viewport.
     func markReactionViewportHidden(id: String) {
         reactionViewportController.markHidden(id: id)
     }
 
+    /// Loads reactions for a message (unless cached, or unless `force` is set),
+    /// then applies them to the display list.
     func loadReactions(for messageId: String, force: Bool = false) async {
         if !force, let cached = reactionCache[messageId] {
             applyReactions(cached, to: messageId)
@@ -778,10 +847,12 @@ class ChatViewModel: NSObject,ObservableObject {
             guard !isCancellation(error) else {
                 return
             }
-            print("❌ Ошибка загрузки реакций для \(messageId): \(error)")
+            print("❌ Failed to load reactions for \(messageId): \(error)")
         }
     }
 
+    /// Optimistically toggles the current user's reaction on a message, then
+    /// reconciles with the server state, restoring the old state on failure.
     func toggleReaction(messageId: String, emoji: String) async {
         guard let service = chatService,
               let index = messages.firstIndex(where: { $0.id == messageId }) else {
@@ -817,12 +888,13 @@ class ChatViewModel: NSObject,ObservableObject {
                 applyReactions(oldReactions, to: messageId)
                 return
             }
-            print("❌ Ошибка изменения реакции \(emoji) для \(messageId): \(error)")
+            print("❌ Failed to toggle reaction \(emoji) for \(messageId): \(error)")
             reactionCache[messageId] = oldReactions
             applyReactions(oldReactions, to: messageId)
         }
     }
 
+    /// Mutates the in-memory reactions of a message and notifies observers.
     private func applyReactions(_ reactions: [MessageReaction], to messageId: String) {
         reactionCache[messageId] = reactions
         if let index = messages.firstIndex(where: { $0.id == messageId }) {
@@ -833,6 +905,8 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
+    /// Computes the resulting reaction list after the current user toggles an
+    /// emoji, keeping counts and user sets consistent.
     private func toggledReactions(_ reactions: [MessageReaction], emoji: String) -> [MessageReaction] {
         let myId = currentUserId.isEmpty ? "users/me" : currentUserId
         var result = reactions
@@ -870,6 +944,7 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
+    /// Whether an error represents a cancelled task or URL request.
     private func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError {
             return true
@@ -878,6 +953,7 @@ class ChatViewModel: NSObject,ObservableObject {
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
     
+    /// Returns the ID of the message at or before the space's last-read mark.
     func lastReadMessageId(in messages: [Message]) -> String? {
         guard let space = selectedSpace else { return nil }
         let lastRead = space.lastReadTimestamp ?? Date()
@@ -887,6 +963,8 @@ class ChatViewModel: NSObject,ObservableObject {
         return messages.last?.id
     }
     
+    /// Chooses where the message list should initially scroll: the first unread
+    /// message, or the newest one if everything has been read.
     func initialScrollTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
         if let lastRead = loadLastReadTimestamp(for: spaceId) {
             if let firstUnread = messages.reversed().first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
@@ -898,6 +976,7 @@ class ChatViewModel: NSObject,ObservableObject {
         return messages.first.map { ($0.id, .bottom) }
     }
     
+    /// Persists the last-read timestamp for a space and updates the unread badge.
     func markMessageAsRead(_ message: Message, in spaceId: String) {
         guard !message.isFromMe else { return }
         
@@ -918,21 +997,25 @@ class ChatViewModel: NSObject,ObservableObject {
         updateDockBadge()
     }
     
+    /// Stores a space's last-read timestamp in UserDefaults.
     func saveLastReadTimestamp(for spaceId: String, date: Date) {
         defaults.set(date, forKey: lastReadKeyPrefix + spaceId)
         print("DEBUG: mapping saved: \(directChatUserMapping)")
     }
 
+    /// Loads a space's persisted last-read timestamp.
     private func loadLastReadTimestamp(for spaceId: String) -> Date? {
         return defaults.object(forKey: lastReadKeyPrefix + spaceId) as? Date
     }
     
+    /// Sends the current message and forces a final UI refresh for the scroll view.
     func sendMessageAndScroll(_ text: String) async {
         await sendMessage(text)
         await MainActor.run {
             objectWillChange.send()
         }
     }
+    /// Shows a macOS notification for an incoming message in a space.
     private func sendNotification(for message: Message, in space: ChatSpace) {
         guard !message.isFromMe else { return }
 
@@ -951,6 +1034,8 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
     
+    /// Scans every non-selected space for newer incoming messages, sends a
+    /// notification (deduplicated) per the latest one and bumps unread counts.
     func checkAllSpacesForNewMessages() async {
         PerfBeacon.mark("Bg", phase: "checkAllSpaces START", detail: "spaces=\(spaces.count)")
         print("🟢 [Check] START: spaces=\(spaces.count), selected=\(selectedSpace?.name ?? "nil"), dedup=\(sentNotificationIds.count)")
@@ -1022,6 +1107,7 @@ class ChatViewModel: NSObject,ObservableObject {
         print("🟢 [Check] DONE")
     }
 
+    /// Resolves a message's author name before it is used in a notification.
     private func messageWithResolvedAuthor(_ message: Message) async -> Message {
         guard let senderId = message.senderId, !message.isFromMe else {
             return message
@@ -1032,6 +1118,8 @@ class ChatViewModel: NSObject,ObservableObject {
         return resolvedMessage
     }
 
+    /// Best-effort name for a sender, preferring the name cache and falling back
+    /// to the value already stored on the message.
     private func resolvedAuthorName(for senderId: String, fallback: String) async -> String {
         if let cached = userNameCache[senderId], isUsablePersonName(cached) {
             return cached
@@ -1047,6 +1135,7 @@ class ChatViewModel: NSObject,ObservableObject {
         return fallback
     }
     
+    /// Starts the 60-second background check for new incoming messages.
     func startBackgroundCheck() {
         backgroundCheckTimer?.invalidate()
         backgroundCheckTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
@@ -1054,19 +1143,23 @@ class ChatViewModel: NSObject,ObservableObject {
             print("⏰ [Timer tick] spaces=\(self.spaces.count), service=\(self.chatService != nil ? "OK" : "nil")")
             Task { await self.checkAllSpacesForNewMessages() }
         }
-        print("⏰ startBackgroundCheck: таймер запущен (60с)")
+        print("⏰ startBackgroundCheck: timer started (60s)")
     }
 
+    /// Stops the background new-message check.
     func stopBackgroundCheck() {
         backgroundCheckTimer?.invalidate()
         backgroundCheckTimer = nil
     }
 
+    /// Refreshes the dock tile badge with the total unread count across spaces.
     private func updateDockBadge() {
         let total = spaces.reduce(0) { $0 + $1.unreadCount }
         NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : ""
     }
     
+    /// Sorts spaces by newest activity (message timestamp), with direct chats
+    /// before groups/channels and names as the final tiebreaker.
     private func sortSpaces() {
         spaces = spaces.sorted { a, b in
             let aTime = a.lastMessageTimestamp ?? .distantPast
@@ -1082,14 +1175,16 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
     
+    /// Re-resolves names for every direct chat in the sidebar (needs the current
+    /// user ID to know which member is the conversation partner).
     private func refreshDirectChatMappingsAndNames() async {
         guard chatService != nil else { return }
         guard !currentUserId.isEmpty else {
-            print("⚠️ currentUserId не загружен, пропускаем")
+            print("⚠️ currentUserId not loaded, skipping")
             return
         }
         
-        print("🔄 refreshDirectChatMappingsAndNames: начат, currentUserId = \(currentUserId)")
+        print("🔄 refreshDirectChatMappingsAndNames: started, currentUserId = \(currentUserId)")
         
         for space in spaces where space.type == .direct {
             await refreshDirectChatMappingAndName(for: space)
@@ -1097,17 +1192,19 @@ class ChatViewModel: NSObject,ObservableObject {
         objectWillChange.send()
     }
 
+    /// Resolves the display name of one direct chat: finds the non-current member
+    /// and shows their human-readable name as the chat title.
     private func refreshDirectChatMappingAndName(for space: ChatSpace) async {
         guard let service = chatService else { return }
         guard !currentUserId.isEmpty else { return }
         
         do {
             let members = try await service.fetchSpaceMembers(spaceId: space.id)
-            print("📋 Участники чата \(space.id): \(members)")
+            print("📋 Members of chat \(space.id): \(members)")
             
             let otherUserId = members.first { $0 != currentUserId && $0.hasPrefix("users/") }
             guard let userId = otherUserId else {
-                print("⚠️ Не найден собеседник для чата \(space.id), участники: \(members)")
+                print("⚠️ No interlocutor found for chat \(space.id), members: \(members)")
                 return
             }
             
@@ -1119,13 +1216,14 @@ class ChatViewModel: NSObject,ObservableObject {
             let name = await getDirectChatDisplayName(userId: userId)
             if let index = spaces.firstIndex(where: { $0.id == space.id }) {
                 spaces[index].name = name
-                print("✅ Обновлено имя чата: \(name)")
+                print("✅ Updated chat name: \(name)")
             }
         } catch {
-            print("❌ Ошибка для \(space.id): \(error)")
+            print("❌ Error for \(space.id): \(error)")
         }
     }
 
+    /// Human-readable title for a direct chat, resolved from the partner user.
     private func getDirectChatDisplayName(userId: String) async -> String {
         if let cached = userEmailCache[userId], isUsablePersonName(cached) {
             return cached
@@ -1137,9 +1235,11 @@ class ChatViewModel: NSObject,ObservableObject {
         return displayName
     }
     
+    /// Posts a sample welcome notification, used to demonstrate the badge
+    /// and notification flow right after a successful sign-in.
     func sendWelcomeNotification() {
         let testMessage = Message(
-            text: "Бобро поржаловать!",
+            text: L.str("welcome.message"),
             authorName: "Google Chat",
             isFromMe: false,
             timestamp: Date(),
@@ -1147,7 +1247,7 @@ class ChatViewModel: NSObject,ObservableObject {
         )
         let testSpace = ChatSpace(
             id: "welcome",
-            name: "Приветствие",
+            name: L.str("welcome.space"),
             type: .direct,
             lastMessage: nil
         )

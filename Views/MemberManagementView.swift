@@ -1,43 +1,45 @@
 import SwiftUI
 
 struct MemberManagementView: View {
+    /// The space whose membership this sheet manages.
     let space: ChatSpace
     @ObservedObject var chatVM: ChatViewModel
     @Environment(\.dismiss) private var dismiss
-    
+
     @State private var searchQuery = ""
     @State private var searchResults: [ChatUser] = []
     @State private var isSearching = false
     @State private var searchTask: Task<Void, Never>?
-    
+
+    /// IDs of users that already belong to the current space.
     private var memberIds: Set<String> {
         Set(chatVM.currentSpaceMembers.map { $0.id })
     }
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Участники")
+            Text(L.str("members.title"))
                 .font(.title2)
                 .fontWeight(.semibold)
-            
+
             HStack {
-                TextField("Имя или email…", text: $searchQuery)
+                TextField(L.str("member.search.placeholder"), text: $searchQuery)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: searchQuery) { _ in
                         scheduleSearch()
                     }
-                Button("Найти") {
+                Button(L.str("search")) {
                     scheduleSearch(immediate: true)
                 }
             }
-            
+
             if isSearching {
                 ProgressView()
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 4)
             } else if !searchQuery.isEmpty && !searchResults.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Добавить участника")
+                    Text(L.str("add.member.header"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     ForEach(searchResults) { user in
@@ -48,10 +50,10 @@ struct MemberManagementView: View {
                                 .lineLimit(1)
                             Spacer()
                             if memberIds.contains(user.id) {
-                                Text("В чате")
+                                Text(L.str("already.in.chat"))
                                     .foregroundColor(.secondary)
                             } else {
-                                Button("Добавить") {
+                                Button(L.str("add")) {
                                     addMember(user)
                                 }
                             }
@@ -61,12 +63,12 @@ struct MemberManagementView: View {
                 }
                 .padding(.vertical, 4)
             } else if !searchQuery.isEmpty {
-                Text("Никого не найдено")
+                Text(L.str("no.results"))
                     .foregroundColor(.secondary)
             }
-            
+
             Divider()
-            
+
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(chatVM.currentSpaceMembers) { member in
@@ -77,10 +79,10 @@ struct MemberManagementView: View {
                                 .lineLimit(1)
                             Spacer()
                             if member.id == chatVM.myUserId {
-                                Text("Вы")
+                                Text(L.str("you"))
                                     .foregroundColor(.secondary)
                             } else {
-                                Button("Удалить", role: .destructive) {
+                                Button(L.str("remove"), role: .destructive) {
                                     removeMember(member)
                                 }
                             }
@@ -90,18 +92,18 @@ struct MemberManagementView: View {
                     }
                 }
             }
-            
+
             if let error = chatVM.errorMessage {
                 Text(error)
                     .font(.footnote)
                     .foregroundColor(.red)
             }
-            
+
             if space.type != .direct {
                 Button(role: .destructive) {
                     leaveChat()
                 } label: {
-                    Label("Покинуть чат", systemImage: "arrow.left.circle")
+                    Label(L.str("leave.chat"), systemImage: "arrow.left.circle")
                 }
             }
         }
@@ -111,7 +113,8 @@ struct MemberManagementView: View {
             searchTask?.cancel()
         }
     }
-    
+
+    /// Schedules a (debounced) user search; `immediate` bypasses the delay.
     private func scheduleSearch(immediate: Bool = false) {
         searchTask?.cancel()
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -134,6 +137,7 @@ struct MemberManagementView: View {
         }
     }
     
+    /// Adds the found user to the space as a member and clears the search.
     private func addMember(_ user: ChatUser) {
         Task {
             await chatVM.addMember(user, to: space.id)
@@ -141,13 +145,15 @@ struct MemberManagementView: View {
             searchResults = []
         }
     }
-    
+
+    /// Removes a member from the space.
     private func removeMember(_ member: ChatUser) {
         Task {
             await chatVM.removeMember(member, from: space.id)
         }
     }
-    
+
+    /// Makes the current user leave the space and closes the sheet.
     private func leaveChat() {
         Task {
             await chatVM.leaveSpace(space.id)
@@ -156,24 +162,26 @@ struct MemberManagementView: View {
     }
 }
 
-private struct AvatarImage: View {
-    let url: URL?
-    let name: String
-    
-    var body: some View {
-        if let url {
-            AsyncImage(url: url) { image in
-                image.resizable().scaledToFill()
-            } placeholder: {
+/// A circular avatar: loads the user's picture when available, otherwise
+    /// falls back to the first letter of the display name.
+    private struct AvatarImage: View {
+        let url: URL?
+        let name: String
+        var body: some View {
+            if let url {
+                AsyncImage(url: url) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    Placeholder()
+                }
+                .clipShape(Circle())
+            } else {
                 Placeholder()
             }
-            .clipShape(Circle())
-        } else {
-            Placeholder()
         }
-    }
-    
-    private func Placeholder() -> some View {
+
+        /// The letter-initial fallback shown without a remote picture.
+        private func Placeholder() -> some View {
         ZStack {
             Circle()
                 .fill(Color.gray.opacity(0.3))

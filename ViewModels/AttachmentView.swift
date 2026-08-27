@@ -1,5 +1,7 @@
 import SwiftUI
 
+/// A compact attachment card: an inline image preview with lazy loading,
+/// or a file row with icon, name, size and a download button.
 struct AttachmentView: View {
     let attachment: Attachment
     @State private var imageData: Data?
@@ -38,7 +40,7 @@ struct AttachmentView: View {
                             .foregroundColor(.secondary)
                     }
                     Spacer()
-                    Button("Скачать") {
+                    Button(L.str("download")) {
                         if let url = attachment.url {
                             downloadFile(url)
                         }
@@ -52,20 +54,22 @@ struct AttachmentView: View {
             }
         }
     }
-    
+
+    /// Loads the preview image from its thumbnail (or full) URL.
     private func loadImage() async {
         guard let loadURL = attachment.thumbnailURL ?? attachment.url else {
-            print("Нет URL для загрузки")
+            print("No URL to load")
             return
         }
         do {
             let (data, _) = try await URLSession.shared.data(from: loadURL)
             imageData = data
         } catch {
-            print("Ошибка загрузки картинки: \(error)")
+            print("Failed to load image: \(error)")
         }
     }
-    
+
+    /// Presents a save panel and writes the downloaded file to disk.
     private func downloadFile(_ url: URL) {
         let savePanel = NSSavePanel()
         savePanel.nameFieldStringValue = attachment.name
@@ -76,13 +80,14 @@ struct AttachmentView: View {
                         let (data, _) = try await URLSession.shared.data(from: url)
                         try data.write(to: saveURL)
                     } catch {
-                        print("Ошибка сохранения: \(error)")
+                        print("Failed to save: \(error)")
                     }
                 }
             }
         }
     }
-    
+
+    /// Formats a byte count using the system file-size formatter.
     private func formatBytes(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file

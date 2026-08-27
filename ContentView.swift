@@ -1,5 +1,9 @@
 import SwiftUI
 
+/// The root view of the app.
+///
+/// Shows the login screen while the user is signed out and the main chat
+/// interface as soon as authentication succeeds.
 struct ContentView: View {
     @StateObject private var authManager = GoogleAuthManager()
     @StateObject private var chatVM = ChatViewModel()
@@ -7,7 +11,7 @@ struct ContentView: View {
     @State private var isAuthenticating = false
     @State private var isCreateChatOpen = false
     @State private var spaceFilterText = ""
-    
+
     var body: some View {
         if !authManager.isSignedIn {
             loginView
@@ -23,32 +27,33 @@ struct ContentView: View {
                 }
         }
     }
-    
+
+    /// The sign-in screen shown before a Google account is connected.
     var loginView: some View {
         VStack(spacing: 20) {
             Image(systemName: "message.circle.fill")
                 .font(.system(size: 80))
                 .foregroundColor(.accentColor)
-            
+
             Text("Google Chat Client")
                 .font(.largeTitle)
                 .bold()
-            
-            Text("Войдите, чтобы начать общение")
+
+            Text(L.str("login.prompt"))
                 .foregroundColor(.secondary)
-            
+
             if isAuthenticating {
                 ProgressView()
                     .progressViewStyle(.circular)
             } else {
-                Button("Войти через Google") {
-                    print("🔘 Кнопка нажата")
+                Button(L.str("login.button")) {
+                    print("🔘 Login button clicked")
                     isAuthenticating = true
                     authManager.configure()
                     authManager.signIn { success, emailOrError in
                         isAuthenticating = false
                         if success {
-                            print("✅ Успешный вход")
+                            print("✅ Sign in succeeded")
                             self.chatVM.startBackgroundCheck()
                             self.chatVM.sendWelcomeNotification()
                             self.chatVM.configure(with: self.authManager.accessToken, authManager: self.authManager)
@@ -57,7 +62,7 @@ struct ContentView: View {
                                 await self.chatVM.loadSpaces()
                             }
                         } else {
-                            print("❌ Ошибка: \(emailOrError)")
+                            print("❌ Error: \(emailOrError)")
                         }
                     }
                 }
@@ -67,13 +72,15 @@ struct ContentView: View {
         .frame(width: 400, height: 300)
     }
     
+    /// The authenticated chat interface: a space list on the left and the
+    /// detail pane on the right.
     var mainChatView: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
                 HStack {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    TextField("Фильтр по названию", text: $spaceFilterText)
+                    TextField(L.str("filter.placeholder"), text: $spaceFilterText)
                         .textFieldStyle(.plain)
                     if !spaceFilterText.isEmpty {
                         Button {
@@ -83,7 +90,7 @@ struct ContentView: View {
                         }
                         .buttonStyle(.plain)
                         .foregroundColor(.secondary)
-                        .help("Очистить фильтр")
+                        .help(L.str("filter.clear"))
                     }
                 }
                 .padding(.horizontal, 10)
@@ -96,7 +103,7 @@ struct ContentView: View {
                         ProgressView()
                             .frame(maxWidth: .infinity, alignment: .center)
                     } else if filteredSpaces.isEmpty {
-                        Text(spaceFilterText.isEmpty ? "Нет чатов" : "Ничего не найдено")
+                        Text(spaceFilterText.isEmpty ? L.str("no.chats") : L.str("nothing.found"))
                             .foregroundColor(.secondary)
                     } else {
                         ForEach(filteredSpaces) { space in
@@ -136,13 +143,13 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "square.and.pencil")
                     }
-                    .help("Новый чат")
+                    .help(L.str("new.chat"))
                 }
                 ToolbarItem {
                     HStack {
                         Text(authManager.userEmail)
                             .font(.caption)
-                        Button("Выйти") {
+                        Button(L.str("sign.out")) {
                             authManager.signOut()
                             chatVM.clearData()
                             chatVM.stopTokenRefreshTimer()
@@ -179,9 +186,9 @@ struct ContentView: View {
                     .id(space.id)
             } else {
                 ContentUnavailableView(
-                    "Выберите чат",
+                    L.str("select.chat"),
                     systemImage: "bubble.left.and.bubble.right",
-                    description: Text("Нажмите на чат слева, чтобы начать переписку")
+                    description: Text(L.str("select.chat.hint"))
                 )
             }
         }
@@ -196,6 +203,7 @@ struct ContentView: View {
         }
     }
 
+    /// Spaces that match the current sidebar filter query.
     private var filteredSpaces: [ChatSpace] {
         let query = spaceFilterText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return chatVM.spaces }
@@ -205,6 +213,8 @@ struct ContentView: View {
     }
 }
 
+/// The detail pane for a single chat: message list, attachment strip,
+/// mention autocomplete and the message input bar.
 struct ChatDetailView: View {
     let space: ChatSpace
     @ObservedObject var chatVM: ChatViewModel
@@ -231,9 +241,9 @@ struct ChatDetailView: View {
                     Button {
                         isShowingMembers = true
                     } label: {
-                        Label("Участники \(memberEmails.count)", systemImage: "person.2")
+                        Label(L.str("members.toolbar", String(memberEmails.count)), systemImage: "person.2")
                     }
-                    .help("Участники чата")
+                    .help(L.str("members.help"))
                     .sheet(isPresented: $isShowingMembers) {
                         MemberManagementView(space: space, chatVM: chatVM)
                     }
@@ -328,7 +338,7 @@ struct ChatDetailView: View {
                 Button(action: selectFiles) {
                     Image(systemName: selectedFiles.isEmpty ? "paperclip" : "paperclip.badge.ellipsis")
                 }
-                .help("Прикрепить файлы")
+                .help(L.str("attach.files"))
                 
                 MessageInputTextView(
                     text: $newMessageText,
@@ -344,7 +354,7 @@ struct ChatDetailView: View {
                 .overlay(
                     Group {
                         if newMessageText.isEmpty && selectedFiles.isEmpty {
-                            Text("Сообщение...")
+                            Text(L.str("message.placeholder"))
                                 .font(.body)
                                 .foregroundColor(Color.secondary.opacity(0.7))
                                 .padding(.horizontal, 13)
@@ -361,7 +371,7 @@ struct ChatDetailView: View {
                     Task { await chatVM.loadMembers(for: space.id) }
                 }
                 
-                Button("Отправить") {
+                Button(L.str("send")) {
                     sendInputMessage()
                 }
                 .disabled((newMessageText.isEmpty && selectedFiles.isEmpty))
@@ -373,6 +383,8 @@ struct ChatDetailView: View {
         }
     }
     
+    /// Uploads any selected attachments and sends the composed message,
+    /// then clears the input and scrolls to the newest row.
     private func sendInputMessage() {
         let text = newMessageText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !selectedFiles.isEmpty else { return }
@@ -385,7 +397,7 @@ struct ChatDetailView: View {
                     attachmentUploadTokens.append(uploadToken)
                 } catch {
                     uploadFailed = true
-                    print("Ошибка загрузки \(fileURL.lastPathComponent): \(error)")
+                    print("Failed to upload \(fileURL.lastPathComponent): \(error)")
                 }
             }
             if uploadFailed {
@@ -406,6 +418,9 @@ struct ChatDetailView: View {
         }
     }
     
+    /// Performs the one-time initial scroll towards the last-read message
+    /// for the current space, using a short stability window so later
+    /// layout changes do not trigger repeated jumps.
     private func scrollToInitialMessage(using proxy: ScrollViewProxy) {
         guard !didInitialScroll, let target = chatVM.initialScrollTarget(for: space.id) else {
             return
@@ -418,6 +433,8 @@ struct ChatDetailView: View {
         stabilizeInitialScroll(using: proxy)
     }
 
+    /// Re-applies the initial scroll anchor a few times while the layout is
+    /// still stabilizing (e.g. while attachments or reactions finish loading).
     private func stabilizeInitialScroll(using proxy: ScrollViewProxy) {
         guard let target = initialScrollTarget,
               let stabilizeInitialScrollUntil,
@@ -438,6 +455,8 @@ struct ChatDetailView: View {
         }
     }
     
+    /// Tracks the word following the last "@" in the input so the mention
+    /// autocomplete list can be shown while the user is typing a mention.
     private func updateMentionQuery(from text: String) {
         guard let atIndex = text.lastIndex(of: "@") else {
             mentionQuery = nil
@@ -452,6 +471,7 @@ struct ChatDetailView: View {
         }
     }
     
+    /// Users of the current space that match the mention query by name or email.
     private func filteredMentionUsers(query: String) -> [ChatUser] {
         let lowercasedQuery = query.lowercased()
         return chatVM.currentSpaceMembers.filter { user in
@@ -461,12 +481,14 @@ struct ChatDetailView: View {
         }
     }
     
+    /// Resolves the display title shown for every space member mention.
     private var mentionDisplayNames: [String: String] {
         Dictionary(uniqueKeysWithValues: chatVM.currentSpaceMembers.map { user in
             (user.id, user.displayTitle)
         })
     }
     
+    /// Unique, sorted list of e-mails (or display titles) of the space members.
     private var memberEmails: [String] {
         Array(Set(chatVM.currentSpaceMembers
             .map { user in user.email?.isEmpty == false ? user.email! : user.displayTitle }
@@ -475,12 +497,15 @@ struct ChatDetailView: View {
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
     
+    /// Replaces the "@query" suffix with a formatted chat mention tag.
     private func insertMention(_ user: ChatUser) {
         guard let atIndex = newMessageText.lastIndex(of: "@") else { return }
         newMessageText.replaceSubrange(atIndex..<newMessageText.endIndex, with: "<\(user.id)> ")
         mentionQuery = nil
     }
     
+    /// Presents the system file picker and stores the chosen files as pending
+    /// attachments for the next message.
     private func selectFiles() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true

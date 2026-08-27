@@ -1,5 +1,7 @@
 import SwiftUI
 
+/// A single message row: sender name, attributed text, reactions, attachment
+/// rows and the timestamp. Messages from the current user are right-aligned.
 struct MessageBubbleView: View {
     let message: Message
     let accessToken: String
@@ -51,7 +53,7 @@ struct MessageBubbleView: View {
                             return .handled
                         })
                         .contextMenu {
-                            Button("Копировать текст") {
+                            Button(L.str("copy.text")) {
                                 copyToClipboard()
                             }
                             Divider()
@@ -61,7 +63,7 @@ struct MessageBubbleView: View {
                                 }
                             }
                             Divider()
-                            Button("Другие реакции...") {
+                            Button(L.str("more.reactions")) {
                                 showReactionPicker = true
                             }
                         }
@@ -122,22 +124,27 @@ struct MessageBubbleView: View {
         }
     }
 
+    /// Toggles a reaction on this message through the parent view model.
     private func toggleReaction(_ emoji: String) {
         Task {
             await onToggleReaction?(message.id, emoji)
         }
     }
-    
+
+    /// Copies the raw message text into the system pasteboard.
     private func copyToClipboard() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(message.text, forType: .string)
-        print("📋 Текст скопирован")
+        print("📋 Text copied")
     }
-    
+
+    /// Formats the message timestamp: time for today, "Yesterday"-style for
+    /// yesterday, weekday + time within the week, else a short date.
     private func formatFullDate(_ date: Date) -> String {
         let now = Date()
         let calendar = Calendar.current
+        let localeID = L.isRussian ? "ru_RU" : "en_US"
         
         if calendar.isDateInToday(date) {
             let formatter = DateFormatter()
@@ -145,24 +152,26 @@ struct MessageBubbleView: View {
             return formatter.string(from: date)
         } else if calendar.isDateInYesterday(date) {
             let formatter = DateFormatter()
-            formatter.dateFormat = "'Вчера, ' HH:mm"
+            formatter.dateFormat = L.str("date.yesterday")
             return formatter.string(from: date)
         } else if let daysAgo = calendar.dateComponents([.day], from: date, to: now).day, daysAgo < 7 {
             let formatter = DateFormatter()
             formatter.dateFormat = "EEEE, HH:mm"
-            formatter.locale = Locale(identifier: "ru_RU")
+            formatter.locale = Locale(identifier: localeID)
             return formatter.string(from: date)
         } else {
             let formatter = DateFormatter()
             formatter.dateStyle = .short
             formatter.timeStyle = .short
-            formatter.locale = Locale(identifier: "ru_RU")
+            formatter.locale = Locale(identifier: localeID)
             return formatter.string(from: date)
         }
     }
 }
 
 
+/// Renders one attachment: an inline preview for images plus a download
+/// button, or a file card with icon, name and size for other files.
 struct AttachmentRow: View {
     let attachment: Attachment
     let accessToken: String
@@ -180,7 +189,7 @@ struct AttachmentRow: View {
                             .scaledToFit()
                             .frame(maxWidth: .infinity, maxHeight: 500)
                             .cornerRadius(8)
-                        Button("Скачать") {
+                        Button(L.str("download")) {
                             downloadFile(from: attachment.url)
                         }
                         .font(.caption)
@@ -192,7 +201,7 @@ struct AttachmentRow: View {
                     HStack {
                         ProgressView()
                             .controlSize(.small)
-                        Text("Загрузка...")
+                        Text(L.str("loading"))
                             .font(.caption)
                     }
                     .padding(8)
@@ -204,7 +213,7 @@ struct AttachmentRow: View {
                 } else {
                     HStack {
                         Image(systemName: "exclamationmark.triangle")
-                        Text("Не удалось загрузить")
+                        Text(L.str("load.failed"))
                             .font(.caption)
                     }
                     .padding(8)
@@ -224,7 +233,7 @@ struct AttachmentRow: View {
                             .foregroundColor(.secondary)
                     }
                     Spacer()
-                    Button("Скачать") {
+                    Button(L.str("download")) {
                         downloadFile(from: attachment.url)
                     }
                     .font(.caption)
@@ -237,6 +246,8 @@ struct AttachmentRow: View {
         .animation(.easeInOut(duration: 0.2), value: imageData)
     }
     
+    /// Loads the attachment image: hits the memory/disk cache first, otherwise
+    /// downloads and decodes the bytes, keeping the decode off the main actor.
     private func loadImage() async {
         let cacheKey = imageCacheKey
         if let cachedData = ImageCache.shared.get(forKey: cacheKey) {
@@ -282,7 +293,7 @@ struct AttachmentRow: View {
         } catch {
             PerfBeacon.end("Image", phase: "loadImageData", detail: "ERROR \(error.localizedDescription)")
             if Task.isCancelled { return }
-            print("❌ Ошибка загрузки: \(error)")
+            print("❌ Failed to load image: \(error)")
             await MainActor.run {
                 self.isLoading = false
                 self.onLayoutChanged?()
@@ -298,6 +309,8 @@ struct AttachmentRow: View {
         attachment.resourceName ?? attachment.name
     }
 
+    /// Builds the list of candidate URLs (resource name, upload token, thumbnail,
+    /// download URL — each with and without bearer auth) used to fetch the image.
     private func loadImageData() async throws -> Data {
         var candidates: [ImageLoadCandidate] = []
         if let resourceName = attachment.resourceName,
@@ -340,7 +353,7 @@ struct AttachmentRow: View {
                 
                 guard let httpResponse = response as? HTTPURLResponse,
                       (200..<300).contains(httpResponse.statusCode) else {
-                    print("❌ Ошибка HTTP для картинки: \((response as? HTTPURLResponse)?.statusCode ?? -1), auth: \(candidate.authorization.rawValue), url: \(candidate.url)")
+                    print("❌ HTTP error for image: \((response as? HTTPURLResponse)?.statusCode ?? -1), auth: \(candidate.authorization.rawValue), url: \(candidate.url)")
                     continue
                 }
                 
@@ -350,10 +363,10 @@ struct AttachmentRow: View {
                 if let redirectedData = try await loadImageDataFromAttachmentURLResponse(data) {
                     return redirectedData
                 }
-                print("❌ Ответ не является изображением, auth: \(candidate.authorization.rawValue), url: \(candidate.url)")
+                print("❌ Response is not an image, auth: \(candidate.authorization.rawValue), url: \(candidate.url)")
             } catch {
                 lastError = error
-                print("❌ Не удалось загрузить картинку auth=\(candidate.authorization.rawValue), url=\(candidate.url): \(error)")
+                print("❌ Failed to load image auth=\(candidate.authorization.rawValue), url=\(candidate.url): \(error)")
             }
         }
         
@@ -370,6 +383,7 @@ struct AttachmentRow: View {
         case bearer
     }
 
+    /// Removes candidate entries that appear more than once (same auth + URL).
     private func deduplicated(_ candidates: [ImageLoadCandidate]) -> [ImageLoadCandidate] {
         var seen = Set<String>()
         var result: [ImageLoadCandidate] = []
@@ -382,6 +396,7 @@ struct AttachmentRow: View {
         return result
     }
 
+    /// Builds a `chat.googleapis.com/v1/media/*` download URL for a resource name.
     private func mediaURL(forResourceName resourceName: String) -> URL? {
         var components = URLComponents()
         components.scheme = "https"
@@ -391,6 +406,7 @@ struct AttachmentRow: View {
         return components.url
     }
 
+    /// Builds a `chat.google.com/api/get_attachment_url` URL for an attachment token.
     private func attachmentURL(forToken token: String, urlType: String) -> URL? {
         var components = URLComponents()
         components.scheme = "https"
@@ -405,6 +421,8 @@ struct AttachmentRow: View {
         return components.url
     }
 
+    /// Tries to interpret a non-image response as a JSON/URL wrapper that points
+    /// at the real attachment URL, then loads the data from there.
     private func loadImageDataFromAttachmentURLResponse(_ data: Data) async throws -> Data? {
         if let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let urlString = payload["url"] as? String
@@ -423,6 +441,8 @@ struct AttachmentRow: View {
         return try await loadImageData(fromResolvedURL: url)
     }
 
+    /// Downloads image data from a resolved URL, trying bearer auth and anonymous
+    /// requests depending on whether the host is a Google API domain.
     private func loadImageData(fromResolvedURL url: URL) async throws -> Data? {
         let authorizationModes: [AuthorizationMode] = url.host?.contains("googleapis.com") == true
             ? [.bearer, .none]
@@ -445,6 +465,7 @@ struct AttachmentRow: View {
         return nil
     }
 
+    /// Extracts the first HTTP(S) link found inside a text payload.
     private func firstURL(in text: String) -> URL? {
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
             return nil
@@ -453,6 +474,8 @@ struct AttachmentRow: View {
         return detector.firstMatch(in: text, range: range)?.url
     }
 
+    /// Presents a save panel and downloads the attachment, preferring the cache
+    /// and the resource-name media API where available.
     private func downloadFile(from url: URL?) {
         let cacheKey = attachmentCacheKey
         if let cachedData = AttachmentCache.shared.get(forKey: cacheKey) {
@@ -470,9 +493,9 @@ struct AttachmentRow: View {
                             let data = try await loadImageData()
                             AttachmentCache.shared.set(data, forKey: cacheKey)
                             try data.write(to: saveURL)
-                            print("✅ Изображение сохранено: \(saveURL.lastPathComponent)")
+                            print("✅ Image saved: \(saveURL.lastPathComponent)")
                         } catch {
-                            print("❌ Ошибка сохранения изображения: \(error)")
+                            print("❌ Failed to save image: \(error)")
                         }
                     }
                 }
@@ -497,15 +520,16 @@ struct AttachmentRow: View {
                         let (data, _) = try await URLSession.shared.data(for: request)
                         AttachmentCache.shared.set(data, forKey: cacheKey)
                         try data.write(to: saveURL)
-                        print("✅ Файл сохранён (fallback): \(saveURL.lastPathComponent)")
+                        print("✅ File saved (fallback): \(saveURL.lastPathComponent)")
                     } catch {
-                        print("❌ Ошибка сохранения: \(error)")
+                        print("❌ Failed to save: \(error)")
                     }
                 }
             }
         }
     }
 
+    /// Writes already-downloaded data to a user-chosen location on disk.
     private func saveData(_ data: Data) {
         let savePanel = NSSavePanel()
         savePanel.nameFieldStringValue = attachment.name
@@ -513,14 +537,15 @@ struct AttachmentRow: View {
             if response == .OK, let saveURL = savePanel.url {
                 do {
                     try data.write(to: saveURL)
-                    print("✅ Файл сохранён из кэша: \(saveURL.lastPathComponent)")
+                    print("✅ File saved from cache: \(saveURL.lastPathComponent)")
                 } catch {
-                    print("❌ Ошибка сохранения из кэша: \(error)")
+                    print("❌ Failed to save from cache: \(error)")
                 }
             }
         }
     }
 
+    /// Downloads a non-image attachment through the Google Chat media API.
     private func downloadUsingResourceName(_ resourceName: String, cacheKey: String) {
         let savePanel = NSSavePanel()
         savePanel.nameFieldStringValue = attachment.name
@@ -538,18 +563,19 @@ struct AttachmentRow: View {
                         if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
                             AttachmentCache.shared.set(data, forKey: cacheKey)
                             try data.write(to: saveURL)
-                            print("✅ Файл сохранён через media API: \(saveURL.lastPathComponent), размер: \(data.count) байт")
+                            print("✅ File saved via media API: \(saveURL.lastPathComponent), size: \(data.count) bytes")
                         } else {
-                            print("❌ Ошибка HTTP при скачивании: \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                            print("❌ HTTP error while downloading: \((response as? HTTPURLResponse)?.statusCode ?? -1)")
                         }
                     } catch {
-                        print("❌ Ошибка скачивания через media API: \(error)")
+                        print("❌ Failed to download via media API: \(error)")
                     }
                 }
             }
         }
     }
     
+    /// Picks an SF Symbol icon name based on the attachment MIME type.
     private func fileIcon(for mimeType: String) -> String {
         if mimeType.hasPrefix("image/") {
             return "photo"
@@ -568,6 +594,7 @@ struct AttachmentRow: View {
         }
     }
     
+    /// Formats a byte count using the system file-size formatter.
     private func formatBytes(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file

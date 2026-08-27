@@ -8,26 +8,30 @@ struct CreateChatView: View {
     @State private var selectedType: ChatSpace.SpaceType = .channel
     @State private var isCreating = false
     
+    /// Sheet for creating a new channel or group chat.
+    ///
+    /// Collects a name and a space type, then delegates the creation to the
+    /// shared `ChatViewModel`.
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Новый чат")
+            Text(L.str("new.chat.title"))
                 .font(.headline)
             
-            TextField("Название", text: $name)
+            TextField(L.str("name"), text: $name)
                 .textFieldStyle(.roundedBorder)
             
-            Picker("Тип", selection: $selectedType) {
-                Text("Канал").tag(ChatSpace.SpaceType.channel)
-                Text("Групповой чат").tag(ChatSpace.SpaceType.group)
+            Picker(L.str("type"), selection: $selectedType) {
+                Text(L.str("channel")).tag(ChatSpace.SpaceType.channel)
+                Text(L.str("group.chat")).tag(ChatSpace.SpaceType.group)
             }
             .pickerStyle(.segmented)
             
             HStack {
                 Spacer()
-                Button("Отмена") {
+                Button(L.str("cancel")) {
                     dismiss()
                 }
-                Button(isCreating ? "Создание..." : "Создать") {
+                Button(isCreating ? L.str("creating") : L.str("create")) {
                     Task {
                         isCreating = true
                         let created = await chatVM.createSpace(name: name, type: selectedType)

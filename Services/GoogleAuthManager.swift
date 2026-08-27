@@ -2,12 +2,16 @@ import Foundation
 import GoogleSignIn
 import AppKit
 
+/// Owns the Google Sign-In session: configuration, scopes, sign in/out and
+/// periodic token refresh. Publishes the signed-in state, profile and the
+/// current access token for the rest of the app.
 class GoogleAuthManager: ObservableObject {
     @Published var isSignedIn = false
     @Published var userEmail = ""
     @Published var userName = ""
     @Published var accessToken = ""
 
+    /// Runs a block on the main thread (no-op if already there).
     private func runOnMain(_ work: @escaping () -> Void) {
         if Thread.isMainThread {
             work()
@@ -15,19 +19,22 @@ class GoogleAuthManager: ObservableObject {
             DispatchQueue.main.async(execute: work)
         }
     }
-    
+
+    /// Applies the OAuth client configuration to the shared sign-in instance.
     func configure() {
         let config = GIDConfiguration(clientID: ConfigManager.shared.clientID)
         GIDSignIn.sharedInstance.configuration = config
     }
-    
+
+    /// Presents the Google sign-in window with all required Chat/People scopes
+    /// and reports success (with the account e-mail) or an error message.
     func signIn(completion: @escaping (Bool, String) -> Void) {
-        print("➡️ signIn() вызван")
+        print("➡️ signIn() called")
         guard let window = NSApplication.shared.windows.first else {
-            completion(false, "Окно не найдено")
+            completion(false, L.str("window.notFound"))
             return
         }
-        print("✅ Найдено окно: \(window)")
+        print("✅ Found window: \(window)")
         
         let additionalScopes = [
             "https://www.googleapis.com/auth/chat.spaces.readonly",
@@ -57,7 +64,7 @@ class GoogleAuthManager: ObservableObject {
             
             guard let result = result else {
                 self.runOnMain {
-                    completion(false, "Результат отсутствует")
+                    completion(false, L.str("signin.noResult"))
                 }
                 return
             }
@@ -77,7 +84,8 @@ class GoogleAuthManager: ObservableObject {
             }
         }
     }
-    
+
+    /// Signs the user out of Google and resets the published state.
     func signOut() {
         GIDSignIn.sharedInstance.signOut()
         runOnMain {
@@ -85,10 +93,12 @@ class GoogleAuthManager: ObservableObject {
             self.userEmail = ""
             self.userName = ""
             self.accessToken = ""
-            print("👋 Выход выполнен")
+            print("👋 Sign out completed")
         }
     }
-    
+
+    /// Refreshes the Google access token in the background, publishing the new
+    /// value; returns whether a usable token is available.
     func refreshAccessToken() async -> Bool {
         await withCheckedContinuation { continuation in
             guard let user = GIDSignIn.sharedInstance.currentUser else {
@@ -96,7 +106,7 @@ class GoogleAuthManager: ObservableObject {
                 return
             }
             
-            print("🔄 Вызов refreshTokensIfNeeded...")
+            print("🔄 Calling refreshTokensIfNeeded...")
             user.refreshTokensIfNeeded { refreshedUser, error in
                 if let error = error {
                     continuation.resume(returning: false)

@@ -6,9 +6,14 @@ struct ReactionPickerView: View {
     
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 8)
     
+    /// A picker grid for selecting an emoji reaction, grouped into categories.
+    ///
+    /// Category headers resolve through the localization layer; the underlying
+    /// `name` stays a stable English slug so list identity does not change
+    /// with the active locale.
     var body: some View {
         VStack(spacing: 12) {
-            Text("Выбор реакции")
+            Text(L.str("reaction.picker.title"))
                 .font(.headline)
                 .padding(.top, 16)
             
@@ -16,7 +21,7 @@ struct ReactionPickerView: View {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(ReactionEmojis.categories, id: \.name) { category in
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(category.name)
+                            Text(L.str("category." + category.name))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .padding(.leading, 4)
@@ -50,7 +55,7 @@ struct ReactionPickerView: View {
             
             Divider()
             
-            Button("Закрыть") {
+            Button(L.str("close")) {
                 dismiss()
             }
             .keyboardShortcut(.escape)
@@ -62,13 +67,15 @@ struct ReactionPickerView: View {
 }
 
 enum ReactionEmojis {
+    /// A single grid group; `name` is a stable English slug used both as the
+    /// list identity and as the localization key suffix.
     struct Category {
         let name: String
         let emojis: [String]
     }
     
     static let categories: [Category] = [
-        Category(name: "Смайлики", emojis: [
+        Category(name: "smileys", emojis: [
             "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣",
             "😊", "😇", "🙂", "🙃", "😉", "😌", "😍", "🥰",
             "😘", "😗", "😙", "😚", "😋", "😛", "😝", "😜",
@@ -84,7 +91,7 @@ enum ReactionEmojis {
             "👻", "💀", "👽", "🤖", "🎃", "😺", "😸", "😹",
             "😻", "😼", "😽", "🙀", "😿", "😾"
         ]),
-        Category(name: "Жесты и люди", emojis: [
+        Category(name: "people", emojis: [
             "👍", "👎", "👊", "✊", "🤛", "🤜", "👏", "🙌",
             "👐", "🤲", "🤝", "🙏", "✌️", "🤞", "🤟", "🤘",
             "🤙", "👌", "✋", "🤚", "🖐️", "🖖", "👋", "🤌",
@@ -92,7 +99,7 @@ enum ReactionEmojis {
             "👇", "☝️", "✋", "🫵", "🫶", "👀", "👁️", "🧠",
             "🫀", "🫁", "🦷", "🦴", "👅", "👄", "💋"
         ]),
-        Category(name: "Животные и природа", emojis: [
+        Category(name: "animals", emojis: [
             "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼",
             "🐻‍❄️", "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵",
             "🙈", "🙉", "🙊", "🐒", "🐔", "🐧", "🐦", "🐤",
@@ -101,7 +108,7 @@ enum ReactionEmojis {
             "🐢", "🐍", "🦎", "🦖", "🦕", "🐙", "🦑", "🦀",
             "🐠", "🐟", "🐡", "🦈", "🐬", "🐳", "🐋", "🐊"
         ]),
-        Category(name: "Еда и напитки", emojis: [
+        Category(name: "food", emojis: [
             "🍏", "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇",
             "🍓", "🫐", "🍈", "🍒", "🍑", "🥭", "🍍", "🥥",
             "🥝", "🍅", "🍆", "🥑", "🥦", "🥬", "🥒", "🌶️",
@@ -111,7 +118,7 @@ enum ReactionEmojis {
             "🍜", "🍝", "🍣", "🍤", "🍦", "🍧", "🍨", "🍩",
             "🍪", "🎂", "🍰", "🧁", "🍫", "🍬", "🍭", "🍮"
         ]),
-        Category(name: "Активности", emojis: [
+        Category(name: "activities", emojis: [
             "⚽", "🏀", "🏈", "⚾", "🥎", "🎾", "🏐", "🏉",
             "🥏", "🎱", "🏓", "🏸", "🥅", "🏒", "🏑", "🥍",
             "🏏", "⛳", "🏹", "🎣", "🥊", "🥋", "🎽", "⛸️",
@@ -120,14 +127,14 @@ enum ReactionEmojis {
             "🧗", "🚵", "🚴", "🏆", "🥇", "🥈", "🥉", "🏅",
             "🎖️", "🏵️", "🎗️", "🎫", "🎟️", "🎪", "🤹", "🎭"
         ]),
-        Category(name: "Путешествия", emojis: [
+        Category(name: "travel", emojis: [
             "🚗", "🚕", "🚙", "🚌", "🚎", "🏎️", "🚓", "🚑",
             "🚒", "🚐", "🛻", "🚚", "🚛", "🚜", "🏍️", "🛵",
             "🚲", "🛴", "🚨", "🚔", "🚍", "🚘", "🚖", "✈️",
             "🚀", "🛸", "⛵", "🚤", "🛥️", "🛳️", "⛴️", "🚢",
             "🚂", "🚃", "🚄", "🚅", "🚆", "🚇", "🚈", "🚉"
         ]),
-        Category(name: "Объекты", emojis: [
+        Category(name: "objects", emojis: [
             "⌚", "📱", "💻", "⌨️", "🖥️", "🖨️", "🖱️", "💽",
             "💾", "💿", "📀", "📷", "📸", "📹", "🎥", "📽️",
             "🎞️", "📞", "☎️", "📟", "📠", "📺", "📻", "🎙️",
@@ -135,14 +142,14 @@ enum ReactionEmojis {
             "✂️", "🔑", "🔨", "🪓", "🔧", "🔩", "⚙️", "🧲",
             "💡", "🔦", "🔋", "🔌", "🖊️", "🖋️", "✏️", "📝"
         ]),
-        Category(name: "Символы", emojis: [
+        Category(name: "symbols", emojis: [
             "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍",
             "🤎", "💔", "❣️", "💕", "💞", "💓", "💗", "💖",
             "💘", "💝", "💟", "♥️", "💯", "✅", "❌", "❓",
             "❗", "💢", "💥", "💫", "💦", "💨", "🕳️", "💣",
             "☄️", "🔥", "🌟", "⭐", "🌈", "☀️", "⛈️", "🌧️"
         ]),
-        Category(name: "Флаги", emojis: [
+        Category(name: "flags", emojis: [
             "🇺🇦", "🇺🇸", "🇬🇧", "🇫🇷", "🇩🇪", "🇪🇸", "🇮🇹", "🇵🇱",
             "🇨🇦", "🇯🇵", "🇨🇳", "🇮🇳", "🇧🇷", "🇹🇷", "🇳🇱", "🇵🇹"
         ])

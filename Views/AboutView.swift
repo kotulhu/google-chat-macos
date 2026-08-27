@@ -10,6 +10,8 @@ struct AboutView: View {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
     }()
     
+    /// The "About" sheet: app icon, version/build numbers, developer contact
+    /// and a disclaimer that this is an unofficial client.
     var body: some View {
         VStack(spacing: 16) {
             Image(nsImage: NSApp.applicationIconImage)
@@ -20,7 +22,7 @@ struct AboutView: View {
                 .font(.title2)
                 .fontWeight(.semibold)
             
-            Text("Версия \(appVersion) (сборка \(buildVersion))")
+            Text(L.str("version.format", appVersion, buildVersion))
                 .font(.subheadline)
                 .foregroundColor(.secondary)
             
@@ -28,17 +30,17 @@ struct AboutView: View {
                 .padding(.horizontal, 40)
             
             VStack(spacing: 6) {
-                LabeledContent("Разработчик") {
+                LabeledContent(L.str("developer")) {
                     Text("Vitalii D.")
                 }
-                LabeledContent("Контакт") {
+                LabeledContent(L.str("contact")) {
                     Text("speranza.ua@gmail.com")
                 }
             }
             .font(.body)
             .frame(maxWidth: 220)
             
-            Text("Неофициальный клиент Google Chat для macOS")
+            Text(L.str("unofficial.client.note"))
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -46,7 +48,7 @@ struct AboutView: View {
             
             Spacer()
             
-            Button("Закрыть") {
+            Button(L.str("close")) {
                 dismiss()
             }
             .keyboardShortcut(.escape)
