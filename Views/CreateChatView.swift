@@ -20,9 +20,8 @@ struct CreateChatView: View {
             TextField(L.str("name"), text: $name)
                 .textFieldStyle(.roundedBorder)
             
-            Picker(L.str("type"), selection: $selectedType) {
+            Picker("", selection: $selectedType) {
                 Text(L.str("channel")).tag(ChatSpace.SpaceType.channel)
-                Text(L.str("group.chat")).tag(ChatSpace.SpaceType.group)
             }
             .pickerStyle(.segmented)
             
