@@ -25,6 +25,10 @@ struct ContentView: View {
                         }
                     }
                 }
+                .onReceive(NotificationCenter.default.publisher(for: .openSpaceFromNotification)) { note in
+                    guard let spaceID = note.userInfo?["spaceId"] as? String else { return }
+                    chatVM.openSpace(withID: spaceID)
+                }
         }
     }
 
@@ -374,7 +378,7 @@ struct ChatDetailView: View {
                 Button(L.str("send")) {
                     sendInputMessage()
                 }
-                .disabled((newMessageText.isEmpty && selectedFiles.isEmpty))
+                .disabled((newMessageText.isEmpty && selectedFiles.isEmpty) || chatVM.isSending)
                 .buttonStyle(.borderedProminent)
             }
             .padding()
@@ -388,7 +392,10 @@ struct ChatDetailView: View {
     private func sendInputMessage() {
         let text = newMessageText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !selectedFiles.isEmpty else { return }
+        guard !chatVM.isSending else { return }
+        chatVM.isSending = true
         Task {
+            defer { chatVM.isSending = false }
             var attachmentUploadTokens: [String] = []
             var uploadFailed = false
             for fileURL in selectedFiles {

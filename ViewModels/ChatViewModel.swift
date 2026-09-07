@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import UserNotifications
+import AppKit
 
 @MainActor
 class ChatViewModel: NSObject,ObservableObject {
@@ -11,6 +12,9 @@ class ChatViewModel: NSObject,ObservableObject {
     /// The currently open chat.
     @Published var selectedSpace: ChatSpace?
     @Published var isLoading = false
+    /// True while a message upload/send is in progress; used to disable the
+    /// input field so duplicate sends cannot occur.
+    @Published var isSending = false
     /// Latest user-facing error message (localized by `L`).
     @Published var errorMessage: String?
     /// Members of `selectedSpace`.
@@ -23,6 +27,9 @@ class ChatViewModel: NSObject,ObservableObject {
     private var tokenRefreshTimer: Timer?
     private let defaults = UserDefaults.standard
     private let lastReadKeyPrefix = "lastRead_"
+    /// Text of the last successfully sent message; used to block duplicate
+    /// consecutive sends within the same space.
+    private var lastSentText: String?
     private var backgroundTimer: Timer?
     
     
@@ -184,6 +191,7 @@ class ChatViewModel: NSObject,ObservableObject {
         pollTimer?.invalidate()
         pollTimer = nil
         reactionViewportController.stop()
+        lastSentText = nil
         print("🛑 Polling stopped")
     }
     
@@ -795,13 +803,19 @@ class ChatViewModel: NSObject,ObservableObject {
     /// space so the new message appears immediately.
     @discardableResult
     func sendMessage(_ text: String, attachments: [String] = []) async -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let service = chatService, let space = selectedSpace else { return false }
+        guard trimmed != lastSentText else {
+            print("⚠️ sendMessage: duplicate consecutive identical message blocked")
+            return false
+        }
         do {
             if attachments.isEmpty {
-                try await service.sendMessage(spaceId: space.id, text: text)
+                try await service.sendMessage(spaceId: space.id, text: trimmed)
             } else {
-                try await service.sendMessageWithAttachments(spaceId: space.id, text: text, attachmentUploadTokens: attachments)
+                try await service.sendMessageWithAttachments(spaceId: space.id, text: trimmed, attachmentUploadTokens: attachments)
             }
+            lastSentText = trimmed
             await loadMessages(for: space)
             return true
         } catch {
@@ -1023,6 +1037,8 @@ class ChatViewModel: NSObject,ObservableObject {
         content.title = space.name
         content.body = "\(message.authorName): \(message.text)"
         content.sound = .default
+        content.userInfo = ["spaceId": space.id]
+        NSSound.beep()
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         print("🔔 [Notify] sending: \"\(space.name)\" — \(message.authorName): \(message.text.prefix(40))")
         UNUserNotificationCenter.current().add(request) { error in
@@ -1034,6 +1050,17 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
     
+    /// Opens the chat of a space; used when the user clicks a notification.
+    /// No-op when the space is not part of the loaded chat list.
+    func openSpace(withID spaceID: String) {
+        guard let space = spaces.first(where: { $0.id == spaceID }) else {
+            print("🔔 [Notify] openSpace: no space with id \(spaceID)")
+            return
+        }
+        selectedSpace = space
+        print("🔔 [Notify] openSpace: \(space.name)")
+    }
+
     /// Scans every non-selected space for newer incoming messages, sends a
     /// notification (deduplicated) per the latest one and bumps unread counts.
     func checkAllSpacesForNewMessages() async {
@@ -1253,4 +1280,10 @@ class ChatViewModel: NSObject,ObservableObject {
         )
         sendNotification(for: testMessage, in: testSpace)
     }
+}
+
+/// Posted by the app delegate when the user clicks a delivered notification;
+/// the `spaceId` of the chat to open is carried in the `userInfo` dictionary.
+extension Notification.Name {
+    static let openSpaceFromNotification = Notification.Name("openSpaceFromNotification")
 }
