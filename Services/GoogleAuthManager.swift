@@ -40,6 +40,7 @@ class GoogleAuthManager: ObservableObject {
             "https://www.googleapis.com/auth/chat.spaces.readonly",
             "https://www.googleapis.com/auth/chat.messages.readonly",
             "https://www.googleapis.com/auth/chat.messages.create",
+            "https://www.googleapis.com/auth/chat.messages",
             "https://www.googleapis.com/auth/chat.spaces.create",
             "https://www.googleapis.com/auth/contacts.readonly",
             "https://www.googleapis.com/auth/userinfo.email",

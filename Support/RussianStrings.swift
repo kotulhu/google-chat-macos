@@ -32,6 +32,10 @@ public enum RussianStrings {
         "attach.files": "Прикрепить файлы",
         "message.placeholder": "Сообщение...",
         "send": "Отправить",
+        "edit": "Редактировать",
+        "delete": "Удалить",
+        "save": "Сохранить",
+        "edit.placeholder": "Редактировать сообщение...",
 
         // Member management
         "members.title": "Участники",

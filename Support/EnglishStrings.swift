@@ -31,6 +31,10 @@ public enum EnglishStrings {
         "attach.files": "Attach files",
         "message.placeholder": "Message...",
         "send": "Send",
+        "edit": "Edit",
+        "delete": "Delete",
+        "save": "Save",
+        "edit.placeholder": "Edit message...",
 
         // Member management
         "members.title": "Members",

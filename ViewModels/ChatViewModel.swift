@@ -825,6 +825,38 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
+    /// Updates the text of an existing message and reloads the thread.
+    @discardableResult
+    func updateMessage(_ message: Message, text: String) async -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != message.text else { return false }
+        guard let service = chatService, let space = selectedSpace else { return false }
+        do {
+            try await service.updateMessage(messageName: message.id, newText: trimmed)
+            await loadMessages(for: space)
+            return true
+        } catch {
+            errorMessage = L.str("err.send", error.localizedDescription)
+            print("❌ \(errorMessage!)")
+            return false
+        }
+    }
+
+    /// Deletes an existing message and reloads the thread.
+    @discardableResult
+    func deleteMessage(_ message: Message) async -> Bool {
+        guard let service = chatService, let space = selectedSpace else { return false }
+        do {
+            try await service.deleteMessage(messageName: message.id)
+            await loadMessages(for: space)
+            return true
+        } catch {
+            errorMessage = L.str("err.send", error.localizedDescription)
+            print("❌ \(errorMessage!)")
+            return false
+        }
+    }
+
     /// Notifies the reaction viewport controller that a message became visible
     /// (so lazy reaction loading can trigger).
     func markReactionViewportVisible(id: String) {

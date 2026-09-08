@@ -232,6 +232,8 @@ struct ChatDetailView: View {
     @State private var mentionQuery: String?
     @State private var inputHeight: CGFloat = 36
     @State private var isShowingMembers = false
+    @State private var editingMessage: Message?
+    @State private var editingText = ""
     
     var body: some View {
         VStack(spacing: 0) {
@@ -285,6 +287,13 @@ struct ChatDetailView: View {
                                 },
                                 onToggleReaction: { messageId, emoji in
                                     await chatVM.toggleReaction(messageId: messageId, emoji: emoji)
+                                },
+                                onEdit: { message in
+                                    editingMessage = message
+                                    editingText = message.text
+                                },
+                                onDelete: { message in
+                                    Task { await chatVM.deleteMessage(message) }
                                 }
                             )
                                 .id(message.id)
@@ -338,7 +347,23 @@ struct ChatDetailView: View {
                 .frame(height: 40)
             }
             
-            HStack {
+            Group {
+                if let msg = editingMessage {
+                HStack {
+                    TextField(L.str("edit.placeholder"), text: $editingText)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { saveEditedMessage(msg) }
+                    Button(L.str("save")) {
+                        saveEditedMessage(msg)
+                    }
+                    .disabled(editingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .buttonStyle(.borderedProminent)
+                    Button(L.str("cancel")) {
+                        editingMessage = nil
+                    }
+                }
+            } else {
+                HStack {
                 Button(action: selectFiles) {
                     Image(systemName: selectedFiles.isEmpty ? "paperclip" : "paperclip.badge.ellipsis")
                 }
@@ -380,6 +405,8 @@ struct ChatDetailView: View {
                 }
                 .disabled((newMessageText.isEmpty && selectedFiles.isEmpty) || chatVM.isSending)
                 .buttonStyle(.borderedProminent)
+                    }
+                }
             }
             .padding()
             .background(Color(NSColor.windowBackgroundColor))
@@ -387,6 +414,16 @@ struct ChatDetailView: View {
         }
     }
     
+    /// Saves the edited text of a message through the view model, exiting edit
+    /// mode only after the API confirms the update.
+    private func saveEditedMessage(_ message: Message) {
+        Task {
+            if await chatVM.updateMessage(message, text: editingText) {
+                editingMessage = nil
+            }
+        }
+    }
+
     /// Uploads any selected attachments and sends the composed message,
     /// then clears the input and scrolls to the newest row.
     private func sendInputMessage() {

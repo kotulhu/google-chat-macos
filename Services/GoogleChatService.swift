@@ -439,6 +439,35 @@ class GoogleChatService {
         }
     }
 
+    /// Updates the text of an existing message via the Chat API.
+    /// Requires the `chat.messages` scope.
+    func updateMessage(messageName: String, newText: String) async throws {
+        var components = URLComponents(string: "\(baseURL)\(messageName)")
+        components?.queryItems = [URLQueryItem(name: "updateMask", value: "text")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["text": newText]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await authorizedData(for: request)
+        try validateHTTPResponse(response, data: data, domain: "GoogleChatUpdateMessage")
+        print("📝 Message updated: \(messageName)")
+    }
+
+    /// Deletes an existing message via the Chat API (including threaded
+    /// replies). Requires the `chat.messages` scope.
+    func deleteMessage(messageName: String) async throws {
+        var components = URLComponents(string: "\(baseURL)\(messageName)")
+        components?.queryItems = [URLQueryItem(name: "force", value: "true")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        let (data, response) = try await authorizedData(for: request)
+        try validateHTTPResponse(response, data: data, domain: "GoogleChatDeleteMessage")
+        print("🗑 Message deleted: \(messageName)")
+    }
+
     /// Fetches all reactions of a message across pages, aggregated by emoji.
     func fetchReactions(messageId: String) async throws -> [MessageReaction] {
         var allReactions: [ReactionItem] = []

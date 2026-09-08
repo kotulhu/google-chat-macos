@@ -11,6 +11,8 @@ struct MessageBubbleView: View {
     var onViewportVisible: ((String) -> Void)? = nil
     var onViewportHidden: ((String) -> Void)? = nil
     var onToggleReaction: ((String, String) async -> Void)? = nil
+    var onEdit: ((Message) -> Void)? = nil
+    var onDelete: ((Message) -> Void)? = nil
     
     @ObservedObject private var reactionHistory = ReactionHistoryStore.shared
     @State private var showReactionPicker = false
@@ -52,27 +54,6 @@ struct MessageBubbleView: View {
                             NSWorkspace.shared.open(url)
                             return .handled
                         })
-                        .contextMenu {
-                            Button(L.str("copy.text")) {
-                                copyToClipboard()
-                            }
-                            Divider()
-                            ForEach(reactionHistory.menuEmojis, id: \.self) { emoji in
-                                Button(emoji) {
-                                    toggleReaction(emoji)
-                                }
-                            }
-                            Divider()
-                            Button(L.str("more.reactions")) {
-                                showReactionPicker = true
-                            }
-                        }
-                        .sheet(isPresented: $showReactionPicker) {
-                            ReactionPickerView { emoji in
-                                toggleReaction(emoji)
-                                showReactionPicker = false
-                            }
-                        }
                 }
                 
                 if !message.attachments.isEmpty {
@@ -116,6 +97,37 @@ struct MessageBubbleView: View {
             if !message.isFromMe { Spacer() }
         }
         .padding(.horizontal)
+        .contextMenu {
+            if !message.text.isEmpty {
+                Button(L.str("copy.text")) {
+                    copyToClipboard()
+                }
+            }
+            if message.isFromMe {
+                Button(L.str("edit")) {
+                    onEdit?(message)
+                }
+                Button(L.str("delete"), role: .destructive) {
+                    onDelete?(message)
+                }
+                Divider()
+            }
+            ForEach(reactionHistory.menuEmojis, id: \.self) { emoji in
+                Button(emoji) {
+                    toggleReaction(emoji)
+                }
+            }
+            Divider()
+            Button(L.str("more.reactions")) {
+                showReactionPicker = true
+            }
+        }
+        .sheet(isPresented: $showReactionPicker) {
+            ReactionPickerView { emoji in
+                toggleReaction(emoji)
+                showReactionPicker = false
+            }
+        }
         .onAppear {
             onViewportVisible?(message.id)
         }
