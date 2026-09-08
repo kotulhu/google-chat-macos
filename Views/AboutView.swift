@@ -3,6 +3,9 @@ import SwiftUI
 struct AboutView: View {
     @Environment(\.dismiss) private var dismiss
     
+    private let appName: String = {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Google Chat"
+    }()
     private let appVersion: String = {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
     }()
@@ -18,7 +21,7 @@ struct AboutView: View {
                 .resizable()
                 .frame(width: 80, height: 80)
             
-            Text("Google Chat Client")
+            Text(appName)
                 .font(.title2)
                 .fontWeight(.semibold)
             

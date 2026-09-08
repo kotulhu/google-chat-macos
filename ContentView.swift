@@ -39,7 +39,7 @@ struct ContentView: View {
                 .font(.system(size: 80))
                 .foregroundColor(.accentColor)
 
-            Text("Google Chat Client")
+            Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Google Chat")
                 .font(.largeTitle)
                 .bold()
 
