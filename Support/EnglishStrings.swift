@@ -35,6 +35,7 @@ public enum EnglishStrings {
         "delete": "Delete",
         "save": "Save",
         "edit.placeholder": "Edit message...",
+        "jump.unread.hint": "Jump to first unread message",
 
         // Member management
         "members.title": "Members",

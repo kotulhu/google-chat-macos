@@ -1,6 +1,29 @@
 import SwiftUI
 import AppKit
 
+/// NSTextView subclass that reliably intercepts Return regardless of modifier
+/// state: Ctrl+Enter inserts a line break, plain Enter sends the message.
+final class ChatInputTextView: NSTextView {
+    var onSend: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        guard let chars = event.charactersIgnoringModifiers, chars == "\r" || chars == "\n" else {
+            super.keyDown(with: event)
+            return
+        }
+        // Let an active input method confirm its composition instead of sending.
+        if hasMarkedText() {
+            super.keyDown(with: event)
+            return
+        }
+        if event.modifierFlags.contains(.control) {
+            insertNewline(nil)
+        } else {
+            onSend?()
+        }
+    }
+}
+
 struct MessageInputTextView: NSViewRepresentable {
     @Binding var text: String
     var onSend: () -> Void
@@ -21,7 +44,8 @@ struct MessageInputTextView: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
         
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 100, height: Self.minHeight))
+        let textView = ChatInputTextView(frame: NSRect(x: 0, y: 0, width: 100, height: Self.minHeight))
+        textView.onSend = { self.onSend() }
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.allowsUndo = true
@@ -42,7 +66,8 @@ struct MessageInputTextView: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.documentView as? NSTextView else { return }
+        guard let textView = nsView.documentView as? ChatInputTextView else { return }
+        textView.onSend = { self.onSend() }
         if textView.string != text {
             textView.string = text
             textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
@@ -76,19 +101,6 @@ struct MessageInputTextView: NSViewRepresentable {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
             parent.onHeightChange(MessageInputTextView.contentHeight(for: textView))
-        }
-        
-        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                let modifiers = NSApp.currentEvent?.modifierFlags ?? []
-                if modifiers.contains(.control) {
-                    textView.insertNewline(nil)
-                    return true
-                }
-                parent.onSend()
-                return true
-            }
-            return false
         }
     }
 }

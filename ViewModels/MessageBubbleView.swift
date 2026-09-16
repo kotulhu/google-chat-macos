@@ -15,6 +15,7 @@ struct MessageBubbleView: View {
     var onDelete: ((Message) -> Void)? = nil
     
     @ObservedObject private var reactionHistory = ReactionHistoryStore.shared
+    @ObservedObject var nameResolver: NameResolver
     @State private var showReactionPicker = false
     
     var body: some View {
@@ -25,12 +26,17 @@ struct MessageBubbleView: View {
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 4) {
                 if !message.isFromMe {
                     if let senderId = message.senderId {
-                        Button(message.authorName) {
-                            onSenderTap?(senderId)
+                        HStack(spacing: 6) {
+                            AvatarImage(url: nameResolver.avatarURL(for: senderId),
+                                        name: nameResolver.displayName(for: senderId))
+                                .frame(width: 20, height: 20)
+                            Button(nameResolver.displayName(for: senderId)) {
+                                onSenderTap?(senderId)
+                            }
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .buttonStyle(.plain)
                         }
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .buttonStyle(.plain)
                     } else {
                         Text(message.authorName)
                             .font(.caption)
@@ -190,6 +196,11 @@ struct AttachmentRow: View {
     var onLayoutChanged: (() -> Void)? = nil
     @State private var imageData: Data?
     @State private var isLoading = true
+    @State private var fileSize: Int64 = 0
+
+    /// In-memory cache of resolved attachment sizes keyed by download URL, so
+    /// reloads of the same message do not re-probe the server.
+    private static var sizeCache: [String: Int64] = [:]
     
     var body: some View {
         Group {
@@ -240,9 +251,11 @@ struct AttachmentRow: View {
                         Text(attachment.name)
                             .font(.caption)
                             .lineLimit(1)
-                        Text(formatBytes(attachment.size))
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                        if fileSize > 0 {
+                            Text(formatBytes(fileSize))
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                     }
                     Spacer()
                     Button(L.str("download")) {
@@ -253,6 +266,7 @@ struct AttachmentRow: View {
                 .padding(8)
                 .background(Color.gray.opacity(0.1))
                 .cornerRadius(8)
+                .task { await determineSize() }
             }
         }
         .animation(.easeInOut(duration: 0.2), value: imageData)
@@ -484,6 +498,65 @@ struct AttachmentRow: View {
         }
         let range = NSRange(location: 0, length: text.utf16.count)
         return detector.firstMatch(in: text, range: range)?.url
+    }
+
+    /// Resolves the real file size of an attachment: uses the caller-provided
+    /// value when present, then a cached probe, then a live HEAD/range request.
+    /// Leaves the label hidden when the size cannot be determined.
+    private func determineSize() async {
+        guard fileSize <= 0 else { return }
+        if attachment.size > 0 {
+            fileSize = attachment.size
+            return
+        }
+        guard let url = attachment.url else { return }
+        let cacheKey = url.absoluteString
+        if let cached = Self.sizeCache[cacheKey] {
+            fileSize = cached
+            return
+        }
+        let length = await fetchContentLength(from: url)
+        if length > 0 {
+            fileSize = length
+            Self.sizeCache[cacheKey] = length
+        }
+    }
+
+    /// Asks the server for the attachment size: a HEAD request first, then a
+    /// 1-byte ranged GET that reports the total via Content-Range.
+    private func fetchContentLength(from url: URL) async -> Int64 {
+        var headRequest = URLRequest(url: url)
+        headRequest.httpMethod = "HEAD"
+        headRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        headRequest.timeoutInterval = 10
+        if let (_, response) = try? await URLSession.shared.data(for: headRequest),
+           let http = response as? HTTPURLResponse,
+           (200..<300).contains(http.statusCode) {
+            let length = Int64(http.expectedContentLength)
+            if length > 0 {
+                return length
+            }
+        }
+
+        var rangeRequest = URLRequest(url: url)
+        rangeRequest.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        rangeRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        rangeRequest.timeoutInterval = 10
+        guard let (_, response) = try? await URLSession.shared.data(for: rangeRequest),
+              let http = response as? HTTPURLResponse,
+              let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+              let total = totalSize(from: contentRange) else {
+            return 0
+        }
+        return total
+    }
+
+    /// Parses the total size out of a "bytes 0-0/TOTAL" Content-Range header.
+    private func totalSize(from contentRange: String) -> Int64? {
+        guard let slash = contentRange.lastIndex(of: "/") else { return nil }
+        let total = contentRange[contentRange.index(after: slash)...]
+        guard let value = Int64(total), value > 0 else { return nil }
+        return value
     }
 
     /// Presents a save panel and downloads the attachment, preferring the cache

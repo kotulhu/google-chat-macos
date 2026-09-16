@@ -25,6 +25,25 @@ class GoogleChatService {
         accessToken
     }
 
+    /// Parses a Google Chat `createTime` RFC-3339 timestamp. Google returns it
+    /// with *or* without fractional seconds depending on the message, but
+    /// `ISO8601DateFormatter` with `.withFractionalSeconds` fails on whole-second
+    /// timestamps — so both variants are tried. Missing/unparseable times fall
+    /// back to `.distantPast` (never "now"), otherwise an old message would be
+    /// stamped with the current moment, jump to the top of the feed and get
+    /// (repeatedly) delivered as a notification.
+    static func parseGoogleTimestamp(_ string: String?) -> Date {
+        guard let string, !string.isEmpty else { return .distantPast }
+        let withFractional = ISO8601DateFormatter()
+        withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFractional.date(from: string) {
+            return date
+        }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: string) ?? .distantPast
+    }
+
     /// Sends a request with a Bearer header; on a 401 it refreshes the token
     /// once and retries, then returns the raw data and response.
     private func authorizedData(for request: URLRequest, retryOnUnauthorized: Bool = true) async throws -> (Data, URLResponse) {
@@ -196,9 +215,6 @@ class GoogleChatService {
         PerfBeacon.start("Net", phase: "fetchMessages:decode")
         let decodedResponse = try JSONDecoder().decode(MessagesResponse.self, from: data)
         
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        
         let messages = decodedResponse.messages?.compactMap { msg -> Message? in
             let text = msg.text ?? ""
             let senderId = msg.sender?.name
@@ -214,7 +230,7 @@ class GoogleChatService {
                 senderName = "User \(rawId.prefix(8))"
             }
             
-            let timestamp = msg.createTime.flatMap { formatter.date(from: $0) } ?? Date()
+            let timestamp = GoogleChatService.parseGoogleTimestamp(msg.createTime)
             
             let attachments: [Attachment] = msg.attachment?.compactMap { attach -> Attachment? in
                 let contentName = attach.contentName ?? attach.name.components(separatedBy: "/").last ?? "attachment"
@@ -307,7 +323,16 @@ class GoogleChatService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any] = ["text": text]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (_, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await authorizedData(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "GoogleChatSend",
+                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                userInfo: [NSLocalizedDescriptionKey: "Message send failed: \(body)"]
+            )
+        }
         print("📤 Message sent")
     }
     
@@ -912,6 +937,72 @@ class GoogleChatService {
         }
         let response = try JSONDecoder().decode(Response.self, from: data)
         return response.resourceName
+    }
+
+    /// Batch-resolves display names and photo URLs for up to 200 user IDs via
+    /// the People API.  Returns a dictionary keyed by the `users/XXX` form.
+    func fetchPeopleBatch(userIds: [String]) async throws -> [String: ResolvedProfile] {
+        guard !userIds.isEmpty else { return [:] }
+        let maxBatch = 200
+        let chunks = stride(from: 0, to: userIds.count, by: maxBatch).map {
+            Array(userIds[$0..<Swift.min($0 + maxBatch, userIds.count)])
+        }
+
+        var merged: [String: ResolvedProfile] = [:]
+        for chunk in chunks {
+            let chunkResult = try await fetchPeopleBatchChunk(chunk)
+            merged.merge(chunkResult) { _, new in new }
+        }
+        return merged
+    }
+
+    private func fetchPeopleBatchChunk(_ userIds: [String]) async throws -> [String: ResolvedProfile] {
+        var components = URLComponents(string: "https://people.googleapis.com/v1/people:batchGet")!
+        let resourceNames = userIds.map {
+            URLQueryItem(name: "resourceNames", value: $0.replacingOccurrences(of: "users/", with: "people/"))
+        }
+        components.queryItems = resourceNames + [
+            URLQueryItem(name: "personFields", value: "names,photos,emailAddresses")
+        ]
+        guard let url = components.url else { throw URLError(.badURL) }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        PerfBeacon.start("Net", phase: "fetchPeopleBatch:network")
+        let (data, response) = try await authorizedData(for: request)
+        PerfBeacon.end("Net", phase: "fetchPeopleBatch:network", detail: "bytes=\(data.count), ids=\(userIds.count)")
+        try validateHTTPResponse(response, data: data, domain: "PeopleBatchGet")
+
+        struct BatchResponse: Decodable {
+            let responses: [PersonResponse]?
+        }
+        struct PersonResponse: Decodable {
+            let resourceName: String?
+            let names: [NameItem]?
+            let photos: [PhotoItem]?
+            let emailAddresses: [EmailItem]?
+        }
+        struct NameItem: Decodable {
+            let displayName: String?
+        }
+        struct PhotoItem: Decodable {
+            let url: String?
+        }
+        struct EmailItem: Decodable {
+            let value: String?
+        }
+
+        let decoded = try JSONDecoder().decode(BatchResponse.self, from: data)
+        var result: [String: ResolvedProfile] = [:]
+        for item in decoded.responses ?? [] {
+            guard let resourceName = item.resourceName else { continue }
+            let userId = resourceName.replacingOccurrences(of: "people/", with: "users/")
+            let displayName = item.names?.first?.displayName
+            let photoURL = item.photos?.first?.url
+            let email = item.emailAddresses?.first?.value
+            result[userId] = ResolvedProfile(displayName: displayName, photoURL: photoURL, email: email)
+        }
+        return result
     }
     
     /// Throws a descriptive error when the HTTP response is not a 2xx status.

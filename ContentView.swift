@@ -21,6 +21,7 @@ struct ContentView: View {
                     if chatVM.spaces.isEmpty && !authManager.accessToken.isEmpty {
                         chatVM.configure(with: authManager.accessToken, authManager: authManager)
                         Task {
+                            await authManager.ensureDirectoryScopeIfNeeded()
                             await chatVM.loadSpaces()
                         }
                     }
@@ -63,6 +64,7 @@ struct ContentView: View {
                             self.chatVM.configure(with: self.authManager.accessToken, authManager: self.authManager)
                             self.chatVM.startTokenRefreshTimer(authManager: self.authManager)
                             Task {
+                                await self.authManager.ensureDirectoryScopeIfNeeded()
                                 await self.chatVM.loadSpaces()
                             }
                         } else {
@@ -169,6 +171,7 @@ struct ContentView: View {
             .onChange(of: chatVM.selectedSpace) { newSpace in
                 if let space = newSpace {
                     chatVM.stopPolling()
+                    chatVM.isLoading = true
                     chatVM.messages = []
                     chatVM.currentSpaceMembers = []
                     Task {
@@ -237,118 +240,194 @@ struct ChatDetailView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text(space.name)
-                    .font(.headline)
-                
-                Spacer()
-                
-                if space.type != .direct {
-                    Button {
-                        isShowingMembers = true
-                    } label: {
-                        Label(L.str("members.toolbar", String(memberEmails.count)), systemImage: "person.2")
-                    }
-                    .help(L.str("members.help"))
-                    .sheet(isPresented: $isShowingMembers) {
-                        MemberManagementView(space: space, chatVM: chatVM)
-                    }
-                }
-            }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(NSColor.windowBackgroundColor))
-            .overlay(Divider(), alignment: .bottom)
-            .task(id: space.id) {
-                if space.type != .direct {
-                    await chatVM.loadMembers(for: space.id)
-                }
-            }
+            headerBar
+            messageList
+            mentionBar
+            attachmentStrip
+            composerBar
+        }
+    }
+
+    /// The chat title bar with the member-management button.
+    private var headerBar: some View {
+        HStack {
+            Text(space.name)
+                .font(.headline)
             
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(chatVM.messages.reversed()) { message in
-                            MessageBubbleView(
-                                message: message,
-                                accessToken: chatVM.accessToken,
-                                onSenderTap: { userId in
-                                    Task { await chatVM.openDirectChat(with: userId) }
-                                },
-                                mentionDisplayNames: mentionDisplayNames,
-                                onAttachmentLayoutChanged: {
-                                    stabilizeInitialScroll(using: proxy)
-                                },
-                                onViewportVisible: { messageId in
-                                    chatVM.markReactionViewportVisible(id: messageId)
-                                },
-                                onViewportHidden: { messageId in
-                                    chatVM.markReactionViewportHidden(id: messageId)
-                                },
-                                onToggleReaction: { messageId, emoji in
-                                    await chatVM.toggleReaction(messageId: messageId, emoji: emoji)
-                                },
-                                onEdit: { message in
-                                    editingMessage = message
-                                    editingText = message.text
-                                },
-                                onDelete: { message in
-                                    Task { await chatVM.deleteMessage(message) }
-                                }
-                            )
-                                .id(message.id)
-                                .onAppear {
-                                    chatVM.markMessageAsRead(message, in: space.id)
-                                }
-                        }
-                    }
-                    .padding()
+            Spacer()
+            
+            if space.type != .direct {
+                Button {
+                    isShowingMembers = true
+                } label: {
+                    Label(L.str("members.toolbar", String(memberEmails.count)), systemImage: "person.2")
                 }
-                .onAppear {
-                    scrollProxy = proxy
-                    scrollToInitialMessage(using: proxy)
-                }
-                .onChange(of: chatVM.messages) { _ in
-                    PerfBeacon.mark("Render", phase: "messagesChanged", detail: "count=\(chatVM.messages.count)")
-                    scrollToInitialMessage(using: proxy)
+                .help(L.str("members.help"))
+                .sheet(isPresented: $isShowingMembers) {
+                    MemberManagementView(space: space, chatVM: chatVM)
                 }
             }
-            if let mentionQuery,
-               !filteredMentionUsers(query: mentionQuery).isEmpty {
-                MentionAutocompleteView(users: filteredMentionUsers(query: mentionQuery)) { user in
-                    insertMention(user)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.windowBackgroundColor))
+        .overlay(Divider(), alignment: .bottom)
+        .task(id: space.id) {
+            if space.type != .direct {
+                await chatVM.loadMembers(for: space.id)
+            }
+        }
+    }
+
+    /// The scrolling message list with lazy-name rendering and the loading
+    /// preloader overlay.
+    private var messageList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(chatVM.messages.reversed()) { message in
+                        messageRow(message, proxy: proxy)
+                    }
+                }
+                .padding()
+            }
+            .onAppear {
+                scrollProxy = proxy
+                scrollToInitialMessage(using: proxy)
+            }
+            .onChange(of: chatVM.messages) { _ in
+                PerfBeacon.mark("Render", phase: "messagesChanged", detail: "count=\(chatVM.messages.count)")
+                scrollToInitialMessage(using: proxy)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            jumpToUnreadButton
+        }
+        .overlay {
+            if chatVM.isLoading || chatVM.isSending {
+                ProgressView()
+                    .controlSize(.large)
+            }
+        }
+    }
+
+    /// Floating button that scrolls to the first unread message, or to the
+    /// newest message when everything has been read.
+    private var jumpToUnreadButton: some View {
+        let unread = chatVM.unreadCount(for: space.id)
+        return Button {
+            jumpToFirstUnread()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: unread > 0 ? "arrow.down.circle.fill" : "arrow.down.to.line")
+                if unread > 0 {
+                    Text("\(unread)")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                }
+            }
+            .font(.body)
+            .padding(.horizontal, unread > 0 ? 12 : 9)
+            .padding(.vertical, 8)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.secondary.opacity(0.3)))
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, 12)
+        .padding(.bottom, 12)
+        .help(L.str("jump.unread.hint"))
+    }
+
+    /// Scrolls the message list to the first unread message, falling back to
+    /// the newest one when there is nothing unread.
+    private func jumpToFirstUnread() {
+        guard let target = chatVM.initialScrollTarget(for: space.id) else { return }
+        withAnimation(.easeInOut(duration: 0.25)) {
+            scrollProxy?.scrollTo(target.id, anchor: target.anchor)
+        }
+    }
+
+    /// One message row bound to the scroll context, so the huge init call does
+    /// not burden the body's type checker.
+    private func messageRow(_ message: Message, proxy: ScrollViewProxy) -> some View {
+        MessageBubbleView(
+            message: message,
+            accessToken: chatVM.accessToken,
+            onSenderTap: { userId in
+                Task { await chatVM.openDirectChat(with: userId) }
+            },
+            mentionDisplayNames: mentionDisplayNames,
+            onAttachmentLayoutChanged: {
+                stabilizeInitialScroll(using: proxy)
+            },
+            onViewportVisible: { messageId in
+                chatVM.markReactionViewportVisible(id: messageId)
+            },
+            onViewportHidden: { messageId in
+                chatVM.markReactionViewportHidden(id: messageId)
+            },
+            onToggleReaction: { messageId, emoji in
+                await chatVM.toggleReaction(messageId: messageId, emoji: emoji)
+            },
+            onEdit: { message in
+                editingMessage = message
+                editingText = message.text
+            },
+            onDelete: { message in
+                Task { await chatVM.deleteMessage(message) }
+            },
+            nameResolver: chatVM.nameResolver
+        )
+        .id(message.id)
+        .onAppear {
+            chatVM.markMessageAsRead(message, in: space.id)
+        }
+    }
+
+    /// The mention autocomplete strip shown while typing an @ mention.
+    @ViewBuilder private var mentionBar: some View {
+        if let mentionQuery,
+           !filteredMentionUsers(query: mentionQuery).isEmpty {
+            MentionAutocompleteView(users: filteredMentionUsers(query: mentionQuery)) { user in
+                insertMention(user)
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 4)
+        }
+    }
+
+    /// The horizontal strip listing files selected for upload.
+    @ViewBuilder private var attachmentStrip: some View {
+        if !selectedFiles.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack {
+                    ForEach(selectedFiles, id: \.self) { file in
+                        HStack {
+                            Image(systemName: "doc")
+                            Text(file.lastPathComponent)
+                                .lineLimit(1)
+                            Button {
+                                selectedFiles.removeAll { $0 == file }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(4)
+                        .background(Color.gray.opacity(0.2))
+                        .cornerRadius(8)
+                    }
                 }
                 .padding(.horizontal)
-                .padding(.bottom, 4)
             }
-            
-            if !selectedFiles.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack {
-                        ForEach(selectedFiles, id: \.self) { file in
-                            HStack {
-                                Image(systemName: "doc")
-                                Text(file.lastPathComponent)
-                                    .lineLimit(1)
-                                Button {
-                                    selectedFiles.removeAll { $0 == file }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(4)
-                            .background(Color.gray.opacity(0.2))
-                            .cornerRadius(8)
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-                .frame(height: 40)
-            }
-            
-            Group {
-                if let msg = editingMessage {
+            .frame(height: 40)
+        }
+    }
+
+    /// The bottom bar: message edit mode or the composer with attachments.
+    private var composerBar: some View {
+        Group {
+            if let msg = editingMessage {
                 HStack {
                     TextField(L.str("edit.placeholder"), text: $editingText)
                         .textFieldStyle(.roundedBorder)
@@ -364,54 +443,53 @@ struct ChatDetailView: View {
                 }
             } else {
                 HStack {
-                Button(action: selectFiles) {
-                    Image(systemName: selectedFiles.isEmpty ? "paperclip" : "paperclip.badge.ellipsis")
-                }
-                .help(L.str("attach.files"))
-                
-                MessageInputTextView(
-                    text: $newMessageText,
-                    onSend: { sendInputMessage() },
-                    onHeightChange: { height in
-                        inputHeight = height
+                    Button(action: selectFiles) {
+                        Image(systemName: selectedFiles.isEmpty ? "paperclip" : "paperclip.badge.ellipsis")
                     }
-                )
-                .frame(height: inputHeight)
-                .padding(8)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-                .overlay(
-                    Group {
-                        if newMessageText.isEmpty && selectedFiles.isEmpty {
-                            Text(L.str("message.placeholder"))
-                                .font(.body)
-                                .foregroundColor(Color.secondary.opacity(0.7))
-                                .padding(.horizontal, 13)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .allowsHitTesting(false)
+                    .help(L.str("attach.files"))
+                    
+                    MessageInputTextView(
+                        text: $newMessageText,
+                        onSend: { sendInputMessage() },
+                        onHeightChange: { height in
+                            inputHeight = height
                         }
-                    },
-                    alignment: .leading
-                )
-                .onChange(of: newMessageText) { text in
-                    updateMentionQuery(from: text)
-                }
-                .onAppear {
-                    Task { await chatVM.loadMembers(for: space.id) }
-                }
-                
-                Button(L.str("send")) {
-                    sendInputMessage()
-                }
-                .disabled((newMessageText.isEmpty && selectedFiles.isEmpty) || chatVM.isSending)
-                .buttonStyle(.borderedProminent)
+                    )
+                    .frame(height: inputHeight)
+                    .padding(8)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+                    .overlay(
+                        Group {
+                            if newMessageText.isEmpty && selectedFiles.isEmpty {
+                                Text(L.str("message.placeholder"))
+                                    .font(.body)
+                                    .foregroundColor(Color.secondary.opacity(0.7))
+                                    .padding(.horizontal, 13)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .allowsHitTesting(false)
+                            }
+                        },
+                        alignment: .leading
+                    )
+                    .onChange(of: newMessageText) { text in
+                        updateMentionQuery(from: text)
                     }
+                    .onAppear {
+                        Task { await chatVM.loadMembers(for: space.id) }
+                    }
+                    
+                    Button(L.str("send")) {
+                        sendInputMessage()
+                    }
+                    .disabled(newMessageText.isEmpty && selectedFiles.isEmpty)
+                    .buttonStyle(.borderedProminent)
                 }
             }
-            .padding()
-            .background(Color(NSColor.windowBackgroundColor))
-            .overlay(Divider(), alignment: .top)
         }
+        .padding()
+        .background(Color(NSColor.windowBackgroundColor))
+        .overlay(Divider(), alignment: .top)
     }
     
     /// Saves the edited text of a message through the view model, exiting edit

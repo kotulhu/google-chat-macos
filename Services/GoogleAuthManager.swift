@@ -46,8 +46,8 @@ class GoogleAuthManager: ObservableObject {
             "https://www.googleapis.com/auth/userinfo.email",
             "https://www.googleapis.com/auth/userinfo.profile",
             "https://www.googleapis.com/auth/chat.memberships",
-            "https://www.googleapis.com/auth/chat.messages.reactions"
-
+            "https://www.googleapis.com/auth/chat.messages.reactions",
+            "https://www.googleapis.com/auth/directory.readonly"
         ]
         
         GIDSignIn.sharedInstance.signIn(
@@ -95,6 +95,38 @@ class GoogleAuthManager: ObservableObject {
             self.userName = ""
             self.accessToken = ""
             print("👋 Sign out completed")
+        }
+    }
+
+    /// Ensures the `directory.readonly` scope is granted.  If the current
+    /// session does not contain it (e.g. an older token), presents the
+    /// incremental-consent dialog.  Returns `true` when the scope is available.
+    func ensureDirectoryScopeIfNeeded() async -> Bool {
+        let scope = "https://www.googleapis.com/auth/directory.readonly"
+
+        if let granted = GIDSignIn.sharedInstance.currentUser?.grantedScopes,
+           granted.contains(scope) {
+            print("✅ directory.readonly scope already granted")
+            return true
+        }
+
+        guard let user = GIDSignIn.sharedInstance.currentUser,
+              let window = NSApplication.shared.windows.first else {
+            print("⚠️ ensureDirectoryScope: no user or window")
+            return false
+        }
+
+        return await withCheckedContinuation { continuation in
+            user.addScopes([scope], presenting: window) { _, error in
+                if let error = error {
+                    print("⚠️ addScopes failed: \(error.localizedDescription)")
+                    continuation.resume(returning: false)
+                    return
+                }
+                let granted = user.grantedScopes?.contains(scope) ?? false
+                print(granted ? "✅ directory.readonly scope granted" : "⚠️ scope still missing after consent")
+                continuation.resume(returning: granted)
+            }
         }
     }
 

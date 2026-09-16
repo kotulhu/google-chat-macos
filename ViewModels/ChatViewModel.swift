@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import SwiftUI
 import UserNotifications
 import AppKit
@@ -27,9 +28,6 @@ class ChatViewModel: NSObject,ObservableObject {
     private var tokenRefreshTimer: Timer?
     private let defaults = UserDefaults.standard
     private let lastReadKeyPrefix = "lastRead_"
-    /// Text of the last successfully sent message; used to block duplicate
-    /// consecutive sends within the same space.
-    private var lastSentText: String?
     private var backgroundTimer: Timer?
     
     
@@ -45,9 +43,14 @@ class ChatViewModel: NSObject,ObservableObject {
     private var peopleSearchPrepared = false
     private var reactionCache: [String: [MessageReaction]] = [:]
     private var loadingReactionMessageIds = Set<String>()
-    private var userNameCache: [String: String] = [:]
-    private let cacheDefaults = UserDefaults.standard
-    private let userNameCacheKey = "userNameCache"
+
+    let nameResolver = NameResolver()
+    private var nameResolverSubscription: AnyCancellable?
+
+    /// Tracks which space was last loaded so `loadMessages` can distinguish
+    /// a genuine poll update (same space) from a space switch (different space)
+    /// when deciding whether to fire a foreground notification.
+    private var lastLoadedSpaceId: String?
     
     private let mappingKey = "directChatUserMapping"
     private var directChatUserMapping: [String: String] = [:]
@@ -63,7 +66,6 @@ class ChatViewModel: NSObject,ObservableObject {
     override init() {
         super.init()
         
-        loadCache()
         loadMapping()
         
         NotificationCenter.default.addObserver(
@@ -117,17 +119,6 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
     
-    /// Restores the persisted user-name resolution cache.
-    private func loadCache() {
-        userNameCache = cacheDefaults.dictionary(forKey: userNameCacheKey) as? [String: String] ?? [:]
-        print("DEBUG: user name cache loaded: \(userNameCache)")
-    }
-
-    /// Persists the user-name resolution cache to UserDefaults.
-    private func saveCache() {
-        cacheDefaults.set(userNameCache, forKey: userNameCacheKey)
-    }
-
     /// Fetches and caches the current user ID, then refreshes direct-chat
     /// names now that the user identity is known.
     func fetchCurrentUserId() async {
@@ -191,7 +182,6 @@ class ChatViewModel: NSObject,ObservableObject {
         pollTimer?.invalidate()
         pollTimer = nil
         reactionViewportController.stop()
-        lastSentText = nil
         print("🛑 Polling stopped")
     }
     
@@ -209,6 +199,19 @@ class ChatViewModel: NSObject,ObservableObject {
             currentUserEmail: authManager.userEmail,
             currentUserName: currentUserName
         )
+        nameResolver.configure(service: chatService!)
+        nameResolverSubscription?.cancel()
+        nameResolverSubscription = nameResolver.objectWillChange.sink { [weak self] _ in
+            guard let self else { return }
+            for i in self.messages.indices {
+                if let senderId = self.messages[i].senderId {
+                    let resolved = self.nameResolver.displayName(for: senderId)
+                    if self.messages[i].authorName != resolved {
+                        self.messages[i].authorName = resolved
+                    }
+                }
+            }
+        }
         print("🔧 ChatViewModel configured")
         
         sentNotificationIds.removeAll()
@@ -266,46 +269,46 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
     
-    /// Fetches the newest message of every space in parallel to update the
-    /// sidebar timestamps, unread badges and the dock badge.
+    /// Fetches the newest messages of every space in parallel to update the
+    /// sidebar timestamps, unread badges and the dock badge. This is the single
+    /// authoritative source for `unreadCount` (the background new-message check
+    /// must not mutate it, otherwise the same message gets counted twice).
     func refreshUnreadCounts() async {
         PerfBeacon.mark("Bg", phase: "refreshUnreadCounts START", detail: "spaces=\(spaces.count)")
         guard let service = chatService else { return }
         PerfBeacon.start("Bg", phase: "refreshUnreadCounts")
-        await withTaskGroup(of: (String, Message?).self) { group in
+        await withTaskGroup(of: (String, [Message]).self) { group in
             for space in spaces {
                 group.addTask {
                     do {
-                        let messages = try await service.fetchMessages(spaceId: space.id, pageSize: 1)
-                        return (space.id, messages.first)
+                        let messages = try await service.fetchMessages(spaceId: space.id, pageSize: 20)
+                        return (space.id, messages)
                     } catch {
-                        return (space.id, nil)
+                        return (space.id, [])
                     }
                 }
             }
-            for await (spaceId, lastMessage) in group {
+            for await (spaceId, messages) in group {
                 if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
-                    if let lastMessage = lastMessage {
+                    if let lastMessage = messages.first {
                         spaces[index].lastMessageTimestamp = lastMessage.timestamp
                     }
-                    if let lastRead = loadLastReadTimestamp(for: spaceId) {
-                        if let lastMessage = lastMessage, !lastMessage.isFromMe, lastMessage.timestamp > lastRead {
-                            spaces[index].unreadCount = 1
-                        } else {
-                            spaces[index].unreadCount = 0
-                        }
-                    } else {
-                        if let lastMessage = lastMessage, !lastMessage.isFromMe {
-                            spaces[index].unreadCount = 1
-                        } else {
-                            spaces[index].unreadCount = 0
-                        }
-                    }
+                    spaces[index].unreadCount = unreadCount(from: messages, spaceId: spaceId)
                 }
             }
         }
         PerfBeacon.end("Bg", phase: "refreshUnreadCounts", detail: "spaces=\(spaces.count)")
         updateDockBadge()
+    }
+
+    /// Counts the incoming messages that arrived after the persisted read mark.
+    /// Without a read mark yet, a space with an incoming newest message shows 1.
+    private func unreadCount(from messages: [Message], spaceId: String) -> Int {
+        guard let lastRead = loadLastReadTimestamp(for: spaceId) else {
+            guard let newest = messages.first else { return 0 }
+            return newest.isFromMe ? 0 : 1
+        }
+        return messages.filter { !$0.isFromMe && $0.timestamp > lastRead }.count
     }
     
     /// Starts the 30-second unread-count background refresh.
@@ -324,12 +327,7 @@ class ChatViewModel: NSObject,ObservableObject {
     
     /// Returns a cached user name synchronously; falls back to a short-ID label.
     func getUserNameSync(userId: String) -> String {
-        if let cached = userNameCache[userId], isUsablePersonName(cached) {
-            return cached
-        }
-        userNameCache.removeValue(forKey: userId)
-        let shortId = userId.replacingOccurrences(of: "users/", with: "").suffix(6)
-        return "User \(shortId)"
+        nameResolver.displayName(for: userId)
     }
     
     /// Loads the messages of a space (cache first, then network), assigns
@@ -361,11 +359,14 @@ class ChatViewModel: NSObject,ObservableObject {
                 await refreshDirectChatMappingAndName(for: space)
             }
             
+            let senderIds = Set(fetchedMessages.compactMap { $0.senderId }.filter { !$0.isEmpty })
+            await nameResolver.resolve(userIds: senderIds)
+            
             PerfBeacon.start("Lenta", phase: "buildNames")
             var messagesWithNames: [Message] = []
             for var msg in fetchedMessages {
                 if let senderId = msg.senderId, !msg.isFromMe {
-                    msg.authorName = getUserName(userId: senderId)
+                    msg.authorName = nameResolver.displayName(for: senderId)
                 } else {
                     msg.authorName = currentUserDisplayName
                 }
@@ -376,6 +377,26 @@ class ChatViewModel: NSObject,ObservableObject {
             }
             PerfBeacon.end("Lenta", phase: "buildNames", detail: "count=\(messagesWithNames.count)")
             let changed = self.messages != messagesWithNames
+
+            // Detect new incoming messages and fire a popup immediately so the
+            // currently-open chat also shows notifications (the 60-second
+            // background check only covers non-selected spaces).
+            if changed && lastLoadedSpaceId == space.id {
+                let previousIds = Set(self.messages.map { $0.id })
+                // `messagesWithNames` is newest-first, so the first new item is
+                // the newest of the newly arrived batch — that is what should
+                // appear in the notification.
+                if let newestIncoming = messagesWithNames.first(where: { !$0.isFromMe && !previousIds.contains($0.id) }) {
+                    let dedupId = "\(space.id)_\(newestIncoming.timestamp.timeIntervalSince1970)"
+                    if !sentNotificationIds.contains(dedupId) {
+                        sentNotificationIds.insert(dedupId)
+                        let notificationMessage = await messageWithResolvedAuthor(newestIncoming)
+                        sendNotification(for: notificationMessage, in: space)
+                    }
+                }
+            }
+            lastLoadedSpaceId = space.id
+
             PerfBeacon.start("Lenta", phase: "assign")
             if changed {
                 self.messages = messagesWithNames
@@ -459,6 +480,8 @@ class ChatViewModel: NSObject,ObservableObject {
         directChatUserMapping.removeAll()
         reactionCache.removeAll()
         loadingReactionMessageIds.removeAll()
+        nameResolver.clearCache()
+        nameResolverSubscription?.cancel()
         updateDockBadge()
         print("🧹 Data cleared")
     }
@@ -467,34 +490,8 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Returns the cached display name for a user, or a short-ID fallback while
     /// the real name is being resolved asynchronously in the background.
     func getUserName(userId: String) -> String {
-        if let cached = userNameCache[userId], isUsablePersonName(cached) {
-            return cached
-        }
-        userNameCache.removeValue(forKey: userId)
-        
-        let shortId = userId.replacingOccurrences(of: "users/", with: "").suffix(6)
-        let fallback = "User \(shortId)"
-        
-        Task {
-            if userNameCache[userId] != nil { return }
-            
-            let realName = await fetchUserRealName(userId: userId)
-            if realName != fallback {
-                userNameCache[userId] = realName
-                saveCache()
-                await MainActor.run {
-                    PerfBeacon.measure("Lenta", phase: "nameResolutionUpdate", minMs: 1, detail: "messages=\(self.messages.count), sender=\(userId)") {
-                        for i in self.messages.indices {
-                            if self.messages[i].senderId == userId {
-                                self.messages[i].authorName = realName
-                            }
-                        }
-                        self.objectWillChange.send()
-                    }
-                }
-            }
-        }
-        
+        let fallback = nameResolver.displayName(for: userId)
+        Task { await nameResolver.resolve(userIds: [userId]) }
         return fallback
     }
 
@@ -525,32 +522,6 @@ class ChatViewModel: NSObject,ObservableObject {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         return trimmed != "Native Mac Client" && trimmed != L.str("user.unknown")
-    }
-    
-    /// Resolves a user's display name, trying the Chat API first and the People
-    /// API e-mail as a fallback, ending with a short-ID label.
-    private func fetchUserRealName(userId: String) async -> String {
-        do {
-            let name = try await chatService?.fetchUserNameViaChatAPI(userId: userId) ?? ""
-            if isUsablePersonName(name) {
-                print("✅ Name from Chat API: \(name) for \(userId)")
-                return name
-            }
-        } catch {
-            print("⚠️ Chat API returned no name for \(userId): \(error)")
-        }
-
-        do {
-            let email = try await chatService?.fetchUserEmail(userId: userId) ?? ""
-            if !email.isEmpty {
-                return email
-            }
-        } catch {
-            print("⚠️ People API returned no email for \(userId): \(error)")
-        }
-
-        let shortId = userId.replacingOccurrences(of: "users/", with: "").suffix(6)
-        return "User \(shortId)"
     }
     
     /// Uploads a file attachment to the service for the given space.
@@ -622,7 +593,9 @@ class ChatViewModel: NSObject,ObservableObject {
         guard let service = chatService else { return }
         do {
             let members = try await service.fetchSpaceMemberUsers(spaceId: spaceId)
-            let enrichedMembers = await enrichUsersWithEmails(members)
+            await nameResolver.resolve(userIds: Set(members.map { $0.id }))
+            let enriched = await enrichUsersWithEmails(members)
+            let enrichedMembers = applyResolvedProfiles(enriched)
             memberCache[spaceId] = enrichedMembers
             for member in enrichedMembers {
                 rememberKnownPerson(member)
@@ -635,6 +608,26 @@ class ChatViewModel: NSObject,ObservableObject {
             if selectedSpace?.id == spaceId {
                 currentSpaceMembers = []
             }
+        }
+    }
+
+    /// Merges People-API-resolved names, photos and e-mails into member cards.
+    private func applyResolvedProfiles(_ users: [ChatUser]) -> [ChatUser] {
+        users.map { user in
+            guard let profile = nameResolver.profiles[user.id] else { return user }
+            let resolvedName = profile.displayName
+            let resolvedURL = profile.photoURL.flatMap(URL.init(string:))
+            let resolvedEmail = profile.email
+            if user.displayName == resolvedName && user.avatarURL == resolvedURL && (user.email == resolvedEmail || resolvedEmail == nil) {
+                return user
+            }
+            return ChatUser(
+                id: user.id,
+                email: user.email ?? resolvedEmail,
+                displayName: resolvedName ?? user.displayName,
+                avatarURL: resolvedURL ?? user.avatarURL,
+                membershipName: user.membershipName
+            )
         }
     }
 
@@ -679,8 +672,10 @@ class ChatViewModel: NSObject,ObservableObject {
         
         for (spaceId, members) in loaded {
             let enriched = await enrichUsersWithEmails(members)
-            memberCache[spaceId] = enriched
-            for member in enriched {
+            await nameResolver.resolve(userIds: Set(enriched.map { $0.id }))
+            let resolved = applyResolvedProfiles(enriched)
+            memberCache[spaceId] = resolved
+            for member in resolved {
                 rememberKnownPerson(member)
             }
         }
@@ -722,6 +717,12 @@ class ChatViewModel: NSObject,ObservableObject {
             
             if let cachedEmail = userEmailCache[user.id], !cachedEmail.isEmpty {
                 result.append(ChatUser(id: user.id, email: cachedEmail, displayName: user.displayName, avatarURL: user.avatarURL, membershipName: user.membershipName))
+                continue
+            }
+            
+            if let resolverEmail = nameResolver.profiles[user.id]?.email, !resolverEmail.isEmpty {
+                userEmailCache[user.id] = resolverEmail
+                result.append(ChatUser(id: user.id, email: resolverEmail, displayName: user.displayName, avatarURL: user.avatarURL, membershipName: user.membershipName))
                 continue
             }
             
@@ -805,17 +806,12 @@ class ChatViewModel: NSObject,ObservableObject {
     func sendMessage(_ text: String, attachments: [String] = []) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let service = chatService, let space = selectedSpace else { return false }
-        guard trimmed != lastSentText else {
-            print("⚠️ sendMessage: duplicate consecutive identical message blocked")
-            return false
-        }
         do {
             if attachments.isEmpty {
                 try await service.sendMessage(spaceId: space.id, text: trimmed)
             } else {
                 try await service.sendMessageWithAttachments(spaceId: space.id, text: trimmed, attachmentUploadTokens: attachments)
             }
-            lastSentText = trimmed
             await loadMessages(for: space)
             return true
         } catch {
@@ -1021,6 +1017,11 @@ class ChatViewModel: NSObject,ObservableObject {
         }
         return messages.first.map { ($0.id, .bottom) }
     }
+
+    /// The current unread badge count for a space (drives the jump-to-unread button).
+    func unreadCount(for spaceId: String) -> Int {
+        spaces.first(where: { $0.id == spaceId })?.unreadCount ?? 0
+    }
     
     /// Persists the last-read timestamp for a space and updates the unread badge.
     func markMessageAsRead(_ message: Message, in spaceId: String) {
@@ -1146,15 +1147,14 @@ class ChatViewModel: NSObject,ObservableObject {
                         sentNotificationIds.insert(messageId)
                         hasNewMessage = true
                         let notificationMessage = await messageWithResolvedAuthor(lastMessage)
-                        await MainActor.run {
-                            self.sendNotification(for: notificationMessage, in: space)
+                        sendNotification(for: notificationMessage, in: space)
+                        // Bump the dock badge immediately so the red dot
+                        // appears without waiting for the 30-second refresh.
+                        if let idx = spaces.firstIndex(where: { $0.id == space.id }) {
+                            spaces[idx].unreadCount += 1
                         }
-                        
-                        if let index = self.spaces.firstIndex(where: { $0.id == space.id }) {
-                            self.spaces[index].unreadCount += 1
-                            self.updateDockBadge()
-                            print("🟢 [Check] \(space.name): NOTIFICATION sent, unread=\(self.spaces[index].unreadCount)")
-                        }
+                        updateDockBadge()
+                        print("🟢 [Check] \(space.name): NOTIFICATION sent, badge updated")
                     }
                 }
             } catch {
@@ -1177,20 +1177,14 @@ class ChatViewModel: NSObject,ObservableObject {
         return resolvedMessage
     }
 
-    /// Best-effort name for a sender, preferring the name cache and falling back
-    /// to the value already stored on the message.
+    /// Best-effort name for a sender, preferring the name resolver cache and
+    /// falling back to the value already stored on the message.
     private func resolvedAuthorName(for senderId: String, fallback: String) async -> String {
-        if let cached = userNameCache[senderId], isUsablePersonName(cached) {
-            return cached
-        }
-        
-        let resolved = await fetchUserRealName(userId: senderId)
+        await nameResolver.resolve(userIds: [senderId])
+        let resolved = nameResolver.displayName(for: senderId)
         if isUsablePersonName(resolved) {
-            userNameCache[senderId] = resolved
-            saveCache()
             return resolved
         }
-        
         return fallback
     }
     
@@ -1284,14 +1278,12 @@ class ChatViewModel: NSObject,ObservableObject {
 
     /// Human-readable title for a direct chat, resolved from the partner user.
     private func getDirectChatDisplayName(userId: String) async -> String {
-        if let cached = userEmailCache[userId], isUsablePersonName(cached) {
-            return cached
+        await nameResolver.resolve(userIds: [userId])
+        let resolved = nameResolver.displayName(for: userId)
+        if isUsablePersonName(resolved) {
+            return resolved
         }
-        userEmailCache.removeValue(forKey: userId)
-        
-        let displayName = await fetchUserRealName(userId: userId)
-        userEmailCache[userId] = displayName
-        return displayName
+        return resolved
     }
     
     /// Posts a sample welcome notification, used to demonstrate the badge

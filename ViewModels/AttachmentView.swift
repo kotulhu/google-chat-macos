@@ -35,9 +35,11 @@ struct AttachmentView: View {
                     VStack(alignment: .leading) {
                         Text(attachment.name)
                             .font(.caption)
-                        Text(formatBytes(attachment.size))
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                        if attachment.size > 0 {
+                            Text(formatBytes(attachment.size))
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                     }
                     Spacer()
                     Button(L.str("download")) {
