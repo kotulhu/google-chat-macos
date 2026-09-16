@@ -5,7 +5,6 @@ final class ConfigManager: ObservableObject {
     
     private let defaults = UserDefaults.standard
     private let clientIDKey = "googleClientID"
-    private let reversedClientIDKey = "googleReversedClientID"
     private let displayNameKey = "localDisplayName"
     
     @Published var clientID: String {
@@ -14,10 +13,18 @@ final class ConfigManager: ObservableObject {
         }
     }
 
-    @Published var reversedClientID: String {
-        didSet {
-            defaults.set(reversedClientID, forKey: reversedClientIDKey)
-        }
+    /// Derives the Google OAuth callback URL scheme (reversed client ID) from
+    /// the regular client ID by reversing its dot-separated components:
+    /// `<prefix>.apps.googleusercontent.com` → `com.googleusercontent.apps.<prefix>`.
+    /// The Sign-In SDK and the build-time URL scheme both expect this exact
+    /// form, so the value is never stored — it is always recomputed.
+    var reversedClientID: String {
+        clientID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: ".")
+            .reversed()
+            .map(String.init)
+            .joined(separator: ".")
     }
     
     @Published var localDisplayName: String {
@@ -30,9 +37,6 @@ final class ConfigManager: ObservableObject {
     private init() {
         clientID = defaults.string(forKey: clientIDKey)
             ?? Self.bundleString(forKey: "GOOGLE_CLIENT_ID")
-            ?? ""
-        reversedClientID = defaults.string(forKey: reversedClientIDKey)
-            ?? Self.bundleString(forKey: "GOOGLE_REVERSED_CLIENT_ID")
             ?? ""
         localDisplayName = defaults.string(forKey: displayNameKey) ?? ""
     }

@@ -68,7 +68,8 @@ public enum RussianStrings {
 
         // Settings
         "display.name": "Отображаемое имя",
-        "settings.oauth.note": "OAuth Client ID используется при входе. Reversed Client ID должен совпадать с GOOGLE_REVERSED_CLIENT_ID в локальном GoogleChat.local.xcconfig, потому что macOS регистрирует callback из Info.plist при сборке приложения.",
+        "settings.oauth.note": "OAuth Client ID используется при входе. Reversed Client ID генерируется из него автоматически и должен совпадать со значением GOOGLE_REVERSED_CLIENT_ID в локальном GoogleChat.local.xcconfig, потому что macOS регистрирует callback из Info.plist при сборке приложения.",
+        "settings.reversed.help": "Только для чтения – выводится из OAuth Client ID разворотом dot-компонентов.",
 
         // Reaction picker
         "reaction.picker.title": "Выбор реакции",

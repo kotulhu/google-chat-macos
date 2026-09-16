@@ -10,8 +10,10 @@ struct SettingsView: View {
             TextField("OAuth Client ID", text: $config.clientID)
                 .textFieldStyle(.roundedBorder)
 
-            TextField("Reversed Client ID", text: $config.reversedClientID)
+            TextField("Reversed Client ID", text: .constant(config.reversedClientID))
                 .textFieldStyle(.roundedBorder)
+                .disabled(true)
+                .help(L.str("settings.reversed.help"))
             
             TextField(L.str("display.name"), text: $config.localDisplayName)
                 .textFieldStyle(.roundedBorder)

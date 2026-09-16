@@ -67,7 +67,8 @@ public enum EnglishStrings {
 
         // Settings
         "display.name": "Display name",
-        "settings.oauth.note": "OAuth Client ID is used for signing in. The Reversed Client ID must match GOOGLE_REVERSED_CLIENT_ID in your local GoogleChat.local.xcconfig, because macOS registers the callback from Info.plist at build time.",
+        "settings.oauth.note": "OAuth Client ID is used for signing in. The Reversed Client ID is generated from it automatically and must match the value baked into the app (GOOGLE_REVERSED_CLIENT_ID in GoogleChat.local.xcconfig), because macOS registers the OAuth callback URL scheme from Info.plist at build time.",
+        "settings.reversed.help": "Read-only – derived from the OAuth Client ID by reversing its dot-separated components.",
 
         // Reaction picker
         "reaction.picker.title": "Choose reaction",
