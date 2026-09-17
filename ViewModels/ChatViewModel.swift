@@ -298,6 +298,7 @@ class ChatViewModel: NSObject,ObservableObject {
             }
         }
         PerfBeacon.end("Bg", phase: "refreshUnreadCounts", detail: "spaces=\(spaces.count)")
+        sortSpaces()
         updateDockBadge()
     }
 
