@@ -13,50 +13,80 @@ struct AboutView: View {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
     }()
     
-    /// The "About" sheet: app icon, version/build numbers, developer contact
-    /// and a disclaimer that this is an unofficial client.
+    /// The "About" sheet: a background image, app icon, version/build numbers,
+    /// developer contact, the Gogol tribute and a disclaimer that this is an
+    /// unofficial client. A scrim keeps the text readable on any artwork.
     var body: some View {
-        VStack(spacing: 16) {
-            Image(nsImage: NSApp.applicationIconImage)
+        ZStack {
+            Image("AboutBackground")
                 .resizable()
-                .frame(width: 80, height: 80)
+                .scaledToFill()
+                .frame(width: 320, height: 360)
+                .clipped()
             
-            Text(appName)
-                .font(.title2)
-                .fontWeight(.semibold)
+            LinearGradient(
+                colors: [
+                    Color(NSColor.windowBackgroundColor).opacity(0.55),
+                    Color.black.opacity(0.45)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
             
-            Text(L.str("version.format", appVersion, buildVersion))
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            
-            Divider()
-                .padding(.horizontal, 40)
-            
-            VStack(spacing: 6) {
-                LabeledContent(L.str("developer")) {
-                    Text("Vitalii D.")
+            VStack(spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 72, height: 72)
+                    .padding(4)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                
+                Text(appName)
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.white)
+                
+                Text(L.str("version.format", appVersion, buildVersion))
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.85))
+                
+                Spacer()
+                
+                VStack(spacing: 6) {
+                    LabeledContent(L.str("developer")) {
+                        Text("Vitalii D.")
+                    }
+                    LabeledContent(L.str("contact")) {
+                        Text("speranza.ua@gmail.com")
+                    }
                 }
-                LabeledContent(L.str("contact")) {
-                    Text("speranza.ua@gmail.com")
+                .font(.body)
+                .foregroundColor(.white)
+                .frame(maxWidth: 220)
+                .padding(10)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                
+                Text(L.str("about.gogol.note"))
+                    .font(.caption)
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                
+                Text(L.str("unofficial.client.note"))
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.8))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                
+                Spacer()
+                
+                Button(L.str("close")) {
+                    dismiss()
                 }
+                .keyboardShortcut(.escape)
             }
-            .font(.body)
-            .frame(maxWidth: 220)
-            
-            Text(L.str("unofficial.client.note"))
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 20)
-            
-            Spacer()
-            
-            Button(L.str("close")) {
-                dismiss()
-            }
-            .keyboardShortcut(.escape)
+            .padding(24)
+            .frame(width: 320, height: 360)
         }
-        .padding(24)
         .frame(width: 320, height: 360)
     }
 }

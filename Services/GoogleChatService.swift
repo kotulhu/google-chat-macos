@@ -742,6 +742,7 @@ class GoogleChatService {
         struct Membership: Decodable {
             let name: String?
             let member: Member?
+            let state: String?
         }
         struct Member: Decodable {
             let name: String
@@ -761,7 +762,8 @@ class GoogleChatService {
                 email: member.email,
                 displayName: member.displayName,
                 avatarURL: member.avatarUrl.flatMap(URL.init(string:)),
-                membershipName: membership.name
+                membershipName: membership.name,
+                membershipState: membership.state
             )
         } ?? []
     }

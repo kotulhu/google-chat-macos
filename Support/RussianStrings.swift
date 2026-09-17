@@ -59,6 +59,7 @@ public enum RussianStrings {
         "developer": "Разработчик",
         "contact": "Контакт",
         "unofficial.client.note": "Неофициальный клиент Google Chat для macOS",
+        "about.gogol.note": "Назван в честь писателя Николая Васильевича Гоголя.",
 
         // Create chat
         "new.chat.title": "Новый чат",
@@ -99,6 +100,8 @@ public enum RussianStrings {
         "err.load.chats": "Ошибка загрузки чатов: %@",
         "err.load.messages": "Ошибка загрузки сообщений: %@",
         "err.send": "Ошибка отправки: %@",
+        "err.send.permission": "Не удалось отправить: пользователь должен подтвердить запрос на переписку.",
+        "dm.request.pending": "Пользователь ещё не подтвердил запрос на переписку. Переписка станет доступна после подтверждения.",
         "err.create.chat": "Ошибка создания чата: %@",
         "err.open.chat": "Ошибка открытия личного чата: %@",
         "err.add.member": "Не удалось добавить участника: %@",

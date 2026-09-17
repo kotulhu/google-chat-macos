@@ -58,6 +58,7 @@ public enum EnglishStrings {
         "developer": "Developer",
         "contact": "Contact",
         "unofficial.client.note": "Unofficial Google Chat client for macOS",
+        "about.gogol.note": "Named in honor of the writer Nikolai Gogol.",
 
         // Create chat
         "new.chat.title": "New chat",
@@ -98,6 +99,8 @@ public enum EnglishStrings {
         "err.load.chats": "Failed to load chats: %@",
         "err.load.messages": "Failed to load messages: %@",
         "err.send": "Failed to send: %@",
+        "err.send.permission": "Couldn't send: this user must accept the chat request first.",
+        "dm.request.pending": "This user hasn't accepted the chat request yet. You'll be able to chat once they accept.",
         "err.create.chat": "Failed to create chat: %@",
         "err.open.chat": "Failed to open direct chat: %@",
         "err.add.member": "Failed to add member: %@",

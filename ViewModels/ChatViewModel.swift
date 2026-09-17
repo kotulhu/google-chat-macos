@@ -589,32 +589,46 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Loads the members of a space (cached after the first call) and populates
     /// the shared known-people cache for search.
     func loadMembers(for spaceId: String) async {
+        let members: [ChatUser]
         if let cached = memberCache[spaceId] {
-            if selectedSpace?.id == spaceId {
-                currentSpaceMembers = cached
-            }
-            return
-        }
-        
-        guard let service = chatService else { return }
-        do {
-            let members = try await service.fetchSpaceMemberUsers(spaceId: spaceId)
-            await nameResolver.resolve(userIds: Set(members.map { $0.id }))
-            let enriched = await enrichUsersWithEmails(members)
-            let enrichedMembers = applyResolvedProfiles(enriched)
-            memberCache[spaceId] = enrichedMembers
-            for member in enrichedMembers {
-                rememberKnownPerson(member)
-            }
-            if selectedSpace?.id == spaceId {
-                currentSpaceMembers = enrichedMembers
-            }
-        } catch {
-            print("❌ Failed to load members: \(error)")
-            if selectedSpace?.id == spaceId {
-                currentSpaceMembers = []
+            members = cached
+        } else {
+            guard let service = chatService else { return }
+            do {
+                let fetched = try await service.fetchSpaceMemberUsers(spaceId: spaceId)
+                await nameResolver.resolve(userIds: Set(fetched.map { $0.id }))
+                let enriched = await enrichUsersWithEmails(fetched)
+                let enrichedMembers = applyResolvedProfiles(enriched)
+                memberCache[spaceId] = enrichedMembers
+                for member in enrichedMembers {
+                    rememberKnownPerson(member)
+                }
+                members = enrichedMembers
+            } catch {
+                print("❌ Failed to load members: \(error)")
+                if selectedSpace?.id == spaceId {
+                    currentSpaceMembers = []
+                }
+                return
             }
         }
+
+        // A direct chat whose counterpart is still `INVITED` is a chat request
+        // that hasn't been accepted yet — sending messages will be blocked.
+        if let idx = spaces.firstIndex(where: { $0.id == spaceId && $0.type == .direct }) {
+            let other = members.first(where: { $0.id != currentUserId })
+            spaces[idx].isRequestPending = (other?.membershipState == "INVITED")
+        }
+        if selectedSpace?.id == spaceId {
+            currentSpaceMembers = members
+        }
+    }
+
+    /// Whether the currently selected chat is a DM request that the other user has
+    /// not accepted yet (sending is blocked until they do).
+    var selectedSpaceIsRequestPending: Bool {
+        guard let id = selectedSpace?.id else { return false }
+        return spaces.first(where: { $0.id == id })?.isRequestPending ?? false
     }
 
     /// Merges People-API-resolved names, photos and e-mails into member cards.
@@ -822,7 +836,11 @@ class ChatViewModel: NSObject,ObservableObject {
             await loadMessages(for: space)
             return true
         } catch {
-            errorMessage = L.str("err.send", error.localizedDescription)
+            if let nsError = error as NSError?, nsError.domain == "GoogleChatSend", nsError.code == 403 {
+                errorMessage = L.str("err.send.permission")
+            } else {
+                errorMessage = L.str("err.send", error.localizedDescription)
+            }
             print("❌ \(errorMessage!)")
             return false
         }

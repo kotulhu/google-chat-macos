@@ -187,9 +187,7 @@ struct ContentView: View {
                     chatVM.currentSpaceMembers = []
                     Task {
                         await chatVM.loadMessages(for: space)
-                        if space.type != .direct {
-                            await chatVM.loadMembers(for: space.id)
-                        }
+                        await chatVM.loadMembers(for: space.id)
                         await MainActor.run {
                             chatVM.startPolling(for: space)
                         }
@@ -252,10 +250,28 @@ struct ChatDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             headerBar
+            requestPendingBanner
             messageList
             mentionBar
             attachmentStrip
             composerBar
+        }
+    }
+
+    /// A persistent warning shown when the open chat is a not-yet-accepted
+    /// DM request: the other user must accept it before messages can be sent.
+    private var requestPendingBanner: some View {
+        Group {
+            if chatVM.selectedSpaceIsRequestPending {
+                Label(L.str("dm.request.pending"), systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.12))
+                    .overlay(Divider(), alignment: .bottom)
+            }
         }
     }
 

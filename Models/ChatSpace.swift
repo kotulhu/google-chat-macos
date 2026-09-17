@@ -9,6 +9,9 @@ struct ChatSpace: Identifiable, Hashable {
     var lastReadTimestamp: Date? = nil
     var lastMessageTimestamp: Date? = nil
     var isPinned: Bool = false
+    /// Set to `true` when the other member's membership state is `INVITED`
+    /// (DM request not yet accepted → sending messages is blocked).
+    var isRequestPending: Bool = false
     
     enum SpaceType {
         case channel, direct, group
