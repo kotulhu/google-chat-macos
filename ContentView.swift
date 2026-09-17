@@ -126,6 +126,11 @@ struct ContentView: View {
                                             .lineLimit(1)
                                     }
                                 }
+                                if space.isPinned {
+                                    Image(systemName: "pin.fill")
+                                        .font(.caption)
+                                        .foregroundColor(.accentColor)
+                                }
                                 Spacer()
                                 if space.unreadCount > 0 {
                                     Text("\(space.unreadCount)")
@@ -134,6 +139,12 @@ struct ContentView: View {
                                         .background(Color.red)
                                         .foregroundColor(.white)
                                         .clipShape(Circle())
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .contextMenu {
+                                Button(space.isPinned ? L.str("space.unpin") : L.str("space.pin")) {
+                                    chatVM.togglePinned(for: space.id)
                                 }
                             }
                             .tag(space)

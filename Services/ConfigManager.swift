@@ -6,11 +6,39 @@ final class ConfigManager: ObservableObject {
     private let defaults = UserDefaults.standard
     private let clientIDKey = "googleClientID"
     private let displayNameKey = "localDisplayName"
+    private let pinnedSpaceIdsKey = "pinnedSpaceIds"
     
     @Published var clientID: String {
         didSet {
             defaults.set(clientID, forKey: clientIDKey)
         }
+    }
+
+    /// IDs of pinned chats in their stable display order (order of pinning:
+    /// the first pinned chat stays on top, new pins are appended).
+    @Published var pinnedSpaceIds: [String] {
+        didSet {
+            defaults.set(pinnedSpaceIds, forKey: pinnedSpaceIdsKey)
+        }
+    }
+
+    /// Returns whether the given chat is pinned.
+    func isPinned(_ spaceId: String) -> Bool {
+        pinnedSpaceIds.contains(spaceId)
+    }
+
+    /// Pins a chat (appended to the top group) or unpins it when already pinned.
+    func togglePin(_ spaceId: String) {
+        if pinnedSpaceIds.contains(spaceId) {
+            pinnedSpaceIds.removeAll { $0 == spaceId }
+        } else {
+            pinnedSpaceIds.append(spaceId)
+        }
+    }
+
+    /// Drops a chat from the pinned list (e.g. after leaving it).
+    func removePin(_ spaceId: String) {
+        pinnedSpaceIds.removeAll { $0 == spaceId }
     }
 
     /// Derives the Google OAuth callback URL scheme (reversed client ID) from
@@ -39,6 +67,7 @@ final class ConfigManager: ObservableObject {
             ?? Self.bundleString(forKey: "GOOGLE_CLIENT_ID")
             ?? ""
         localDisplayName = defaults.string(forKey: displayNameKey) ?? ""
+        pinnedSpaceIds = defaults.stringArray(forKey: pinnedSpaceIdsKey) ?? []
     }
 
     private static func bundleString(forKey key: String) -> String? {

@@ -49,6 +49,10 @@ public enum EnglishStrings {
         "remove": "Remove",
         "leave.chat": "Leave chat",
 
+        // Chat list
+        "space.pin": "Pin to top",
+        "space.unpin": "Unpin",
+
         // About
         "version.format": "Version %@ (build %@)",
         "developer": "Developer",

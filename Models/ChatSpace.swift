@@ -8,6 +8,7 @@ struct ChatSpace: Identifiable, Hashable {
     var unreadCount: Int = 0
     var lastReadTimestamp: Date? = nil
     var lastMessageTimestamp: Date? = nil
+    var isPinned: Bool = false
     
     enum SpaceType {
         case channel, direct, group

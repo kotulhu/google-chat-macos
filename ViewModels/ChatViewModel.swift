@@ -37,6 +37,8 @@ class ChatViewModel: NSObject,ObservableObject {
     
     private var backgroundCheckTimer: Timer?
     
+    private var spacesRefreshTimer: Timer?
+    
     private var userEmailCache: [String: String] = [:]
     private var memberCache: [String: [ChatUser]] = [:]
     private var knownPeopleCache: [String: ChatUser] = [:]
@@ -240,8 +242,10 @@ class ChatViewModel: NSObject,ObservableObject {
             
             print("✅ Fetched \(fetchedSpaces.count) chats")
             self.spaces = fetchedSpaces
+            applyPinState()
             sortSpaces()
             startBackgroundCheck()
+            startSpacesRefresh()
 
             if currentUserId.isEmpty {
                 await fetchCurrentUserId()
@@ -478,6 +482,7 @@ class ChatViewModel: NSObject,ObservableObject {
         stopPolling()
         stopTokenRefreshTimer()
         stopBackgroundCheck()
+        stopSpacesRefresh()
         directChatUserMapping.removeAll()
         reactionCache.removeAll()
         loadingReactionMessageIds.removeAll()
@@ -789,6 +794,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 try await service.deleteMembershipByUserId(spaceId: spaceId, userId: currentUserId)
             }
             spaces.removeAll { $0.id == spaceId }
+            ConfigManager.shared.removePin(spaceId)
             memberCache.removeValue(forKey: spaceId)
             if selectedSpace?.id == spaceId {
                 selectedSpace = nil
@@ -1206,16 +1212,79 @@ class ChatViewModel: NSObject,ObservableObject {
         backgroundCheckTimer = nil
     }
 
+    /// Starts the 15-minute refresh of the space list so chats the user is
+    /// added to appear without restarting the app.
+    func startSpacesRefresh() {
+        spacesRefreshTimer?.invalidate()
+        spacesRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            print("⏰ [SpacesRefresh] tick")
+            Task { await self.refreshSpacesList() }
+        }
+        print("⏰ startSpacesRefresh: timer started (15 min)")
+    }
+
+    /// Stops the space-list refresh.
+    func stopSpacesRefresh() {
+        spacesRefreshTimer?.invalidate()
+        spacesRefreshTimer = nil
+    }
+
+    /// Re-fetches the space list from the API, merges the already-known
+    /// timestamps/unread counters (so the sidebar does not reshuffle), keeps
+    /// the currently selected chat and drops pins of chats that no longer exist.
+    func refreshSpacesList() async {
+        PerfBeacon.mark("Bg", phase: "refreshSpacesList")
+        guard let service = chatService else { return }
+        do {
+            let fetchedSpaces = try await service.fetchSpaces()
+            let existing = Dictionary(uniqueKeysWithValues: spaces.map { ($0.id, $0) })
+            let selectedId = selectedSpace?.id
+            self.spaces = fetchedSpaces.map { space in
+                var updated = space
+                if let old = existing[space.id] {
+                    updated.lastReadTimestamp = old.lastReadTimestamp
+                    updated.lastMessageTimestamp = old.lastMessageTimestamp
+                    updated.unreadCount = old.unreadCount
+                }
+                return updated
+            }
+            applyPinState()
+
+            let currentIds = Set(fetchedSpaces.map { $0.id })
+            for pinnedId in ConfigManager.shared.pinnedSpaceIds where !currentIds.contains(pinnedId) {
+                ConfigManager.shared.removePin(pinnedId)
+            }
+
+            sortSpaces()
+            if let selectedId {
+                selectedSpace = spaces.first(where: { $0.id == selectedId }) ?? spaces.first
+            }
+            PerfBeacon.end("Bg", phase: "refreshSpacesList", detail: "count=\(spaces.count)")
+        } catch {
+            print("⚠️ refreshSpacesList failed: \(error.localizedDescription)")
+        }
+    }
+
     /// Refreshes the dock tile badge with the total unread count across spaces.
     private func updateDockBadge() {
         let total = spaces.reduce(0) { $0 + $1.unreadCount }
         NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : ""
     }
     
-    /// Sorts spaces by newest activity (message timestamp), with direct chats
-    /// before groups/channels and names as the final tiebreaker.
+    /// Sorts spaces: pinned chats stay on top in their stable pin order
+    /// (order of pinning); the rest is ordered by newest activity (message
+    /// timestamp), with direct chats before groups/channels and names as the
+    /// final tiebreaker.
     private func sortSpaces() {
+        let pinnedIds = ConfigManager.shared.pinnedSpaceIds
         spaces = spaces.sorted { a, b in
+            if a.isPinned != b.isPinned {
+                return a.isPinned
+            }
+            if a.isPinned {
+                return (pinnedIds.firstIndex(of: a.id) ?? .max) < (pinnedIds.firstIndex(of: b.id) ?? .max)
+            }
             let aTime = a.lastMessageTimestamp ?? .distantPast
             let bTime = b.lastMessageTimestamp ?? .distantPast
             if aTime != bTime {
@@ -1227,6 +1296,27 @@ class ChatViewModel: NSObject,ObservableObject {
             }
             return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
+    }
+
+    /// Stamps `isPinned` on every space from the persisted pinned-ID list.
+    /// Called right after `spaces` is replaced by a fresh fetch, because the
+    /// API never knows about pins.
+    private func applyPinState() {
+        let pinned = Set(ConfigManager.shared.pinnedSpaceIds)
+        for index in spaces.indices {
+            spaces[index].isPinned = pinned.contains(spaces[index].id)
+        }
+    }
+
+    /// Pins/unpins a chat and immediately re-sorts the sidebar, leaving the
+    /// pinned order untouched by the time-based sorting.
+    func togglePinned(for spaceId: String) {
+        let config = ConfigManager.shared
+        config.togglePin(spaceId)
+        if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
+            spaces[index].isPinned = config.isPinned(spaceId)
+        }
+        sortSpaces()
     }
     
     /// Re-resolves names for every direct chat in the sidebar (needs the current

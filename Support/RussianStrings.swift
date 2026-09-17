@@ -50,6 +50,10 @@ public enum RussianStrings {
         "remove": "Удалить",
         "leave.chat": "Покинуть чат",
 
+        // Список чатов
+        "space.pin": "Закрепить сверху",
+        "space.unpin": "Открепить",
+
         // About
         "version.format": "Версия %@ (сборка %@)",
         "developer": "Разработчик",
