@@ -17,6 +17,10 @@ final class NameResolver: ObservableObject {
 
     private weak var chatService: GoogleChatService?
     private var inflight = Set<String>()
+    /// Profiles that have neither a name nor an e-mail yet and whose one-shot
+    /// e-mail lookup is already scheduled in this session (so we don't hammer
+    /// the People API on every poll for users nobody can resolve).
+    private var pendingEmailLookups = Set<String>()
 
     // MARK: - Public API
 
@@ -32,6 +36,22 @@ final class NameResolver: ObservableObject {
         let profile = profiles[userId]
         if let name = profile?.displayName, !name.isEmpty { return name }
         if let email = profile?.email, !email.isEmpty { return email }
+        // A cached/known profile with neither a name nor an e-mail (e.g. an
+        // external user the directory reduced to an empty profile) still gets
+        // exactly one per-session e-mail attempt, so names degrade to e-mails
+        // instead of raw IDs instead of silently staying as such forever.
+        if profile != nil, chatService != nil, !pendingEmailLookups.contains(userId) {
+            pendingEmailLookups.insert(userId)
+            Task { [weak self] in
+                guard let self else { return }
+                let updated = await self.resolveEmailOnly(for: userId)
+                self.pendingEmailLookups.remove(userId)
+                if updated {
+                    self.saveCache()
+                    self.objectWillChange.send()
+                }
+            }
+        }
         return shortID(userId)
     }
 
@@ -53,63 +73,82 @@ final class NameResolver: ObservableObject {
         defer { inflight.subtract(missing) }
 
         var stillMissing = missing
+        var emptyProfiles: [String] = []
         do {
             let result = try await service.fetchPeopleBatch(userIds: Array(missing))
             for (id, profile) in result {
                 if profiles[id] != profile {
                     profiles[id] = profile
                 }
+                // The directory batch may return a profile for everybody without
+                // a usable name *or* an e-mail.  Keep those candidates for the
+                // per-user e-mail fallback below.
+                if (profile.displayName?.isEmpty ?? true) && (profile.email?.isEmpty ?? true) {
+                    emptyProfiles.append(id)
+                }
             }
             stillMissing = missing.filter { profiles[$0] == nil }
         } catch {
             print("⚠️ NameResolver batch failed: \(error.localizedDescription)")
+            emptyProfiles = Array(missing)
         }
 
         // The batch may have skipped some users (e.g. non-contacts) or failed
         // wholesale without `directory.readonly`.  Fall back to per-user
         // e-mail lookups which work with the `contacts.readonly` scope so
         // names degrade to e-mails instead of raw IDs.
-        let served = await resolveEmailsIndividually(stillMissing)
+        let candidates = Set(stillMissing).union(emptyProfiles)
+        let served = await resolveEmailsIndividually(candidates)
         let didUpdate = served || missing.contains { profiles[$0] != nil }
         if didUpdate {
             saveCache()
             objectWillChange.send()
         }
-
-        inflight.subtract(missing)
     }
 
     /// Tries per-user `people.get?personFields=emailAddresses` lookups for IDs
-    /// that the batch could not resolve.  Returns true when anything changed.
+    /// whose profiles still lack an e-mail.  Returns true when anything changed.
     private func resolveEmailsIndividually(_ userIds: Set<String>) async -> Bool {
-        guard let service = chatService, !userIds.isEmpty else { return false }
+        guard chatService != nil, !userIds.isEmpty else { return false }
         var didUpdate = false
         for userId in userIds {
-            guard profiles[userId] == nil else { continue }
-            do {
-                let email = try await service.fetchUserEmail(userId: userId)
-                guard !email.isEmpty else { continue }
-                let current = profiles[userId]
-                let updated = ResolvedProfile(
-                    displayName: current?.displayName,
-                    photoURL: current?.photoURL,
-                    email: current?.email ?? email
-                )
-                if current != updated {
-                    profiles[userId] = updated
-                    didUpdate = true
-                }
-            } catch {
-                print("⚠️ NameResolver email fallback failed for \(userId): \(error.localizedDescription)")
+            if await resolveEmailOnly(for: userId) {
+                didUpdate = true
             }
         }
         return didUpdate
+    }
+
+    /// Fetches a missing e-mail for one user and merges it into the existing
+    /// profile (preserving any name/photo already resolved).  Skips users that
+    /// already have an e-mail.  Returns true when the profile changed.
+    private func resolveEmailOnly(for userId: String) async -> Bool {
+        guard profiles[userId]?.email == nil else { return false }
+        guard let service = chatService else { return false }
+        do {
+            let email = try await service.fetchUserEmail(userId: userId)
+            guard !email.isEmpty else { return false }
+            let current = profiles[userId]
+            let updated = ResolvedProfile(
+                displayName: current?.displayName,
+                photoURL: current?.photoURL,
+                email: current?.email ?? email
+            )
+            if current != updated {
+                profiles[userId] = updated
+                return true
+            }
+        } catch {
+            print("⚠️ NameResolver email fallback failed for \(userId): \(error.localizedDescription)")
+        }
+        return false
     }
 
     /// Wipes the in-memory and on-disk cache (called on sign-out).
     func clearCache() {
         profiles.removeAll()
         inflight.removeAll()
+        pendingEmailLookups.removeAll()
         cacheDefaults.removeObject(forKey: namesKey)
         cacheDefaults.removeObject(forKey: photosKey)
         cacheDefaults.removeObject(forKey: emailsKey)

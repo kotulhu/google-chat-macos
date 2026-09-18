@@ -1268,6 +1268,10 @@ class ChatViewModel: NSObject,ObservableObject {
                 return updated
             }
             applyPinState()
+            // The API returns an empty display name for direct chats; re-resolve
+            // their titles (names with an e-mail fallback), exactly like the
+            // initial load does, so titles don't vanish on this periodic refresh.
+            await refreshDirectChatMappingsAndNames()
 
             let currentIds = Set(fetchedSpaces.map { $0.id })
             for pinnedId in ConfigManager.shared.pinnedSpaceIds where !currentIds.contains(pinnedId) {
