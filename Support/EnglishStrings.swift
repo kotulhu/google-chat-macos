@@ -77,6 +77,8 @@ public enum EnglishStrings {
 
         // Reaction picker
         "reaction.picker.title": "Choose reaction",
+        "reaction.search.placeholder": "Search emoji",
+        "reaction.search.empty": "No emoji found",
         "category.smileys": "Smileys",
         "category.people": "Gestures & People",
         "category.animals": "Animals & Nature",

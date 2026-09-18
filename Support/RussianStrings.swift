@@ -78,6 +78,8 @@ public enum RussianStrings {
 
         // Reaction picker
         "reaction.picker.title": "Выбор реакции",
+        "reaction.search.placeholder": "Поиск эмодзи",
+        "reaction.search.empty": "Ничего не найдено",
         "category.smileys": "Смайлики",
         "category.people": "Жесты и люди",
         "category.animals": "Животные и природа",
