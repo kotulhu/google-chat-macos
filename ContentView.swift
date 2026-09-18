@@ -246,6 +246,7 @@ struct ChatDetailView: View {
     @State private var isShowingMembers = false
     @State private var editingMessage: Message?
     @State private var editingText = ""
+    @State private var quotedDraft: Message?
     
     var body: some View {
         VStack(spacing: 0) {
@@ -254,6 +255,7 @@ struct ChatDetailView: View {
             messageList
             mentionBar
             attachmentStrip
+            quoteStrip
             composerBar
         }
     }
@@ -403,6 +405,17 @@ struct ChatDetailView: View {
             onDelete: { message in
                 Task { await chatVM.deleteMessage(message) }
             },
+            onQuote: { message in
+                quotedDraft = message
+            },
+            resolveQuotedMessage: { quotedId in
+                chatVM.messages.first { $0.id == quotedId }
+            },
+            onQuoteTap: { quotedId in
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    scrollProxy?.scrollTo(quotedId, anchor: .center)
+                }
+            },
             nameResolver: chatVM.nameResolver
         )
         .id(message.id)
@@ -448,6 +461,43 @@ struct ChatDetailView: View {
                 .padding(.horizontal)
             }
             .frame(height: 40)
+        }
+    }
+
+    /// The strip showing the message selected for quoting before a send, with
+    /// a remove button.  Mirrors the original client's "quoted attachment".
+    @ViewBuilder private var quoteStrip: some View {
+        if let quoted = quotedDraft {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.accentColor.opacity(0.6))
+                    .frame(width: 3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(quoted.authorName.isEmpty ? L.str("quote.original") : quoted.authorName)
+                        .font(.caption.italic())
+                        .foregroundColor(.secondary)
+                    if !quoted.text.isEmpty {
+                        Text(quoted.text)
+                            .font(.caption.italic())
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+                Spacer()
+                Button {
+                    quotedDraft = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(L.str("quote.remove"))
+            }
+            .padding(8)
+            .background(Color.gray.opacity(0.15))
+            .cornerRadius(8)
+            .padding(.horizontal)
+            .padding(.bottom, 4)
         }
     }
 
@@ -509,7 +559,7 @@ struct ChatDetailView: View {
                     Button(L.str("send")) {
                         sendInputMessage()
                     }
-                    .disabled(newMessageText.isEmpty && selectedFiles.isEmpty)
+                    .disabled(newMessageText.isEmpty && selectedFiles.isEmpty && quotedDraft == nil)
                     .buttonStyle(.borderedProminent)
                 }
             }
@@ -533,8 +583,10 @@ struct ChatDetailView: View {
     /// then clears the input and scrolls to the newest row.
     private func sendInputMessage() {
         let text = newMessageText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !selectedFiles.isEmpty else { return }
+        guard !text.isEmpty || !selectedFiles.isEmpty || quotedDraft != nil else { return }
         guard !chatVM.isSending else { return }
+        let quoteId = quotedDraft?.id
+        let quoteLastUpdateTime = quotedDraft?.lastUpdateTime
         chatVM.isSending = true
         Task {
             defer { chatVM.isSending = false }
@@ -552,10 +604,11 @@ struct ChatDetailView: View {
             if uploadFailed {
                 return
             }
-            let sent = await chatVM.sendMessage(text, attachments: attachmentUploadTokens)
+            let sent = await chatVM.sendMessage(text, attachments: attachmentUploadTokens, quotedMessageId: quoteId, quotedLastUpdateTime: quoteLastUpdateTime)
             guard sent else { return }
             newMessageText = ""
             selectedFiles = []
+            quotedDraft = nil
             
             if let firstId = chatVM.messages.first?.id {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {

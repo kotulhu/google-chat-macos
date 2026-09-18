@@ -89,6 +89,10 @@ public enum EnglishStrings {
 
         // Message bubble / attachments
         "copy.text": "Copy text",
+        "quote": "Quote",
+        "quote.original": "Message",
+        "quote.remove": "Remove quote",
+        "quote.jump": "Go to the original message",
         "more.reactions": "More reactions...",
         "download": "Download",
         "loading": "Loading...",

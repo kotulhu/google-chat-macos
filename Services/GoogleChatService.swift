@@ -190,7 +190,13 @@ class GoogleChatService {
             let text: String?
             let sender: Sender?
             let createTime: String?
+            let lastUpdateTime: String?
             let attachment: [AttachmentItem]?
+            let quotedMessageMetadata: QuotedMessageMetadataItem?
+        }
+
+        struct QuotedMessageMetadataItem: Decodable {
+            let name: String?
         }
 
         struct AttachmentItem: Decodable {
@@ -250,7 +256,13 @@ class GoogleChatService {
             } ?? []
             
             guard !text.isEmpty || !attachments.isEmpty else { return nil }
-      
+
+            let quotedMessage = msg.quotedMessageMetadata?.name
+                .flatMap { name -> QuotedMessage? in
+                    guard !name.isEmpty else { return nil }
+                    return QuotedMessage(messageId: name, authorName: nil, text: nil)
+                }
+
             return Message(
                 id: msg.name,
                 text: text,
@@ -258,7 +270,9 @@ class GoogleChatService {
                 isFromMe: isFromMe,
                 timestamp: timestamp,
                 attachments: attachments,
-                senderId: isFromMe ? nil : senderId
+                senderId: isFromMe ? nil : senderId,
+                quotedMessage: quotedMessage,
+                lastUpdateTime: msg.lastUpdateTime ?? msg.createTime
             )
         } ?? []
         
@@ -315,14 +329,28 @@ class GoogleChatService {
         return components.queryItems?.first { $0.name == "attachment_token" }?.value
     }
     
-    func sendMessage(spaceId: String, text: String) async throws {
+    /// Builds the `quotedMessageMetadata` payload.  Google Chat expects the
+    /// `lastUpdateTime` of the quoted message (createTime when never edited).
+    private func quoteMetadata(name: String, lastUpdateTime: String?) -> [String: Any] {
+        var meta: [String: Any] = ["name": name]
+        if let lastUpdateTime, !lastUpdateTime.isEmpty {
+            meta["lastUpdateTime"] = lastUpdateTime
+        }
+        return meta
+    }
+
+    func sendMessage(spaceId: String, text: String, quotedMessageId: String? = nil, quotedLastUpdateTime: String? = nil) async throws {
         let url = URL(string: "\(baseURL)\(spaceId)/messages")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = ["text": text]
+        var body: [String: Any] = ["text": text]
+        if let quotedMessageId, !quotedMessageId.isEmpty {
+            body["quotedMessageMetadata"] = quoteMetadata(name: quotedMessageId, lastUpdateTime: quotedLastUpdateTime)
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        print("📥 [Diag] create body: \(String(data: request.httpBody!, encoding: .utf8) ?? "?")")
         let (data, response) = try await authorizedData(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               (200..<300).contains(httpResponse.statusCode) else {
@@ -435,7 +463,7 @@ class GoogleChatService {
     }
     
     /// Posts a message with attachment data refs built from upload tokens.
-    func sendMessageWithAttachments(spaceId: String, text: String, attachmentUploadTokens: [String]) async throws {
+    func sendMessageWithAttachments(spaceId: String, text: String, attachmentUploadTokens: [String], quotedMessageId: String? = nil, quotedLastUpdateTime: String? = nil) async throws {
         let url = URL(string: "\(baseURL)\(spaceId)/messages")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -449,6 +477,9 @@ class GoogleChatService {
         ]
         if !text.isEmpty {
             body["text"] = text
+        }
+        if let quotedMessageId, !quotedMessageId.isEmpty {
+            body["quotedMessageMetadata"] = quoteMetadata(name: quotedMessageId, lastUpdateTime: quotedLastUpdateTime)
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         

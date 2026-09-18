@@ -90,6 +90,10 @@ public enum RussianStrings {
 
         // Message bubble / attachments
         "copy.text": "Копировать текст",
+        "quote": "Цитировать",
+        "quote.original": "Сообщение",
+        "quote.remove": "Убрать цитату",
+        "quote.jump": "Перейти к цитируемому сообщению",
         "more.reactions": "Другие реакции...",
         "download": "Скачать",
         "loading": "Загрузка...",

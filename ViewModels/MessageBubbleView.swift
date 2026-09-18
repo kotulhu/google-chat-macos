@@ -13,6 +13,11 @@ struct MessageBubbleView: View {
     var onToggleReaction: ((String, String) async -> Void)? = nil
     var onEdit: ((Message) -> Void)? = nil
     var onDelete: ((Message) -> Void)? = nil
+    var onQuote: ((Message) -> Void)? = nil
+    /// Looks up the live message for a quoted id in the current feed.
+    var resolveQuotedMessage: ((String) -> Message?)? = nil
+    /// Scrolls the feed to the original message of a quote.
+    var onQuoteTap: ((String) -> Void)? = nil
     
     @ObservedObject private var reactionHistory = ReactionHistoryStore.shared
     @ObservedObject var nameResolver: NameResolver
@@ -44,6 +49,10 @@ struct MessageBubbleView: View {
                     }
                 }
                 
+
+if let quoted = message.quotedMessage {
+                    quotedBlock(quoted)
+                }
 
                 if !message.text.isEmpty {
                     let attributedText = PerfBeacon.measureReturn("Render", phase: "attributed", minMs: 3, detail: "len=\(message.text.count)") {
@@ -104,10 +113,13 @@ struct MessageBubbleView: View {
         }
         .padding(.horizontal)
         .contextMenu {
-            if !message.text.isEmpty {
+            if !message.text.isEmpty || !message.attachments.isEmpty {
                 Button(L.str("copy.text")) {
                     copyToClipboard()
                 }
+            }
+            Button(L.str("quote")) {
+                onQuote?(message)
             }
             if message.isFromMe {
                 Button(L.str("edit")) {
@@ -147,6 +159,46 @@ struct MessageBubbleView: View {
         Task {
             await onToggleReaction?(message.id, emoji)
         }
+    }
+
+    /// The quoted-message block rendered above the main bubble: a thin accent
+    /// border, a light backdrop, the author and a snippet in italics, and the
+    /// whole block is clickable to jump to the original message.
+    @ViewBuilder
+    private func quotedBlock(_ quoted: QuotedMessage) -> some View {
+        let live = resolveQuotedMessage?(quoted.messageId)
+        let quoteAuthor = live?.authorName ?? quoted.authorName
+        let quoteText = live?.text ?? quoted.text
+        Button {
+            onQuoteTap?(quoted.messageId)
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.accentColor.opacity(0.6))
+                    .frame(width: 3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(quoteAuthor?.isEmpty == false ? quoteAuthor! : L.str("quote.original"))
+                        .font(.caption2.italic())
+                        .foregroundColor(.secondary)
+                    if let quoteText, !quoteText.isEmpty {
+                        Text(quoteText)
+                            .font(.footnote.italic())
+                            .foregroundColor(.secondary)
+                            .lineLimit(4)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
+            .cornerRadius(8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(L.str("quote.jump"))
     }
 
     /// Copies the raw message text into the system pasteboard.

@@ -821,17 +821,17 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
-    /// Sends a message, optionally with uploaded attachments, then reloads the
-    /// space so the new message appears immediately.
+    /// Sends a message, optionally with uploaded attachments and/or a quoted
+    /// message, then reloads the space so the new message appears immediately.
     @discardableResult
-    func sendMessage(_ text: String, attachments: [String] = []) async -> Bool {
+    func sendMessage(_ text: String, attachments: [String] = [], quotedMessageId: String? = nil, quotedLastUpdateTime: String? = nil) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let service = chatService, let space = selectedSpace else { return false }
         do {
             if attachments.isEmpty {
-                try await service.sendMessage(spaceId: space.id, text: trimmed)
+                try await service.sendMessage(spaceId: space.id, text: trimmed, quotedMessageId: quotedMessageId, quotedLastUpdateTime: quotedLastUpdateTime)
             } else {
-                try await service.sendMessageWithAttachments(spaceId: space.id, text: trimmed, attachmentUploadTokens: attachments)
+                try await service.sendMessageWithAttachments(spaceId: space.id, text: trimmed, attachmentUploadTokens: attachments, quotedMessageId: quotedMessageId, quotedLastUpdateTime: quotedLastUpdateTime)
             }
             await loadMessages(for: space)
             return true

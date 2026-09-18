@@ -42,6 +42,16 @@ struct MessageReaction: Identifiable, Equatable, Codable {
     
 }
 
+/// A snapshot of a message quoted by another message.  `messageId` is the full
+/// `spaces/{space}/messages/{message}` resource name (identical to `Message.id`),
+/// which doubles as the scroll anchor of the quoted row.  `authorName`/`text`
+/// are a local snapshot used when the original is not loaded in the feed.
+struct QuotedMessage: Equatable, Codable {
+    let messageId: String
+    var authorName: String?
+    var text: String?
+}
+
 struct Message: Identifiable, Equatable, Codable {
     let id: String
     let text: String
@@ -51,6 +61,10 @@ struct Message: Identifiable, Equatable, Codable {
     var attachments: [Attachment] = []
     let senderId: String?
     var reactions: [MessageReaction] = []
+    var quotedMessage: QuotedMessage?
+    /// Server-format timestamp (`createTime` fallback) sent to the API inside
+    /// `quotedMessageMetadata.lastUpdateTime` when this message is quoted.
+    let lastUpdateTime: String?
     
     init(
         id: String = UUID().uuidString,
@@ -60,7 +74,9 @@ struct Message: Identifiable, Equatable, Codable {
         timestamp: Date,
         attachments: [Attachment] = [],
         senderId: String?,
-        reactions: [MessageReaction] = []
+        reactions: [MessageReaction] = [],
+        quotedMessage: QuotedMessage? = nil,
+        lastUpdateTime: String? = nil
     ) {
         self.id = id
         self.text = text
@@ -70,6 +86,8 @@ struct Message: Identifiable, Equatable, Codable {
         self.attachments = attachments
         self.senderId = senderId
         self.reactions = reactions
+        self.quotedMessage = quotedMessage
+        self.lastUpdateTime = lastUpdateTime
     }
     
     init(from decoder: Decoder) throws {
@@ -82,6 +100,8 @@ struct Message: Identifiable, Equatable, Codable {
         attachments = try container.decodeIfPresent([Attachment].self, forKey: .attachments) ?? []
         senderId = try container.decodeIfPresent(String.self, forKey: .senderId)
         reactions = try container.decodeIfPresent([MessageReaction].self, forKey: .reactions) ?? []
+        quotedMessage = try container.decodeIfPresent(QuotedMessage.self, forKey: .quotedMessage)
+        lastUpdateTime = try container.decodeIfPresent(String.self, forKey: .lastUpdateTime)
     }
     
     static func == (lhs: Message, rhs: Message) -> Bool {
@@ -91,7 +111,9 @@ struct Message: Identifiable, Equatable, Codable {
         lhs.isFromMe == rhs.isFromMe &&
         lhs.timestamp == rhs.timestamp &&
         lhs.attachments == rhs.attachments &&
-        lhs.reactions == rhs.reactions
+        lhs.reactions == rhs.reactions &&
+        lhs.quotedMessage == rhs.quotedMessage &&
+        lhs.lastUpdateTime == rhs.lastUpdateTime
     }
     
     private enum CodingKeys: String, CodingKey {
@@ -103,5 +125,7 @@ struct Message: Identifiable, Equatable, Codable {
         case attachments
         case senderId
         case reactions
+        case quotedMessage
+        case lastUpdateTime
     }
 }
