@@ -1,6 +1,6 @@
 # Google Chat Client (Unofficial)
 
-A native macOS client for Google Chat, built with SwiftUI. This is an alternative to the official PWA, designed to be lightweight, fast, and fully compatible with the Google Chat API.
+A native macOS client for Google Chat, built with SwiftUI. This is an alternative to the official PWA, designed to be lightweight, fast, and fully compatible with the Google Chat REST API.
 
 ## Important Disclaimer
 
@@ -8,85 +8,102 @@ A native macOS client for Google Chat, built with SwiftUI. This is an alternativ
 
 ## Features
 
--   **Native macOS Experience:** Built with SwiftUI for a seamless, fast, and responsive experience.
--   **Full Chat Functionality:**
-    -   View and manage all your chats (Spaces).
-    -   Send and receive messages.
-    -   **Mentions:** Use `@` to mention users in a chat.
-    -   **Direct Messages:** Click on any user's name to start a direct chat.
--   **Media & Files:**
-    -   Send and receive images and files.
-    -   Inline image previews.
--   **Notifications:**
-    -   Native macOS notifications for new messages.
-    -   Unread message counter.
--   **Theming (Planned):** Choose your own fonts, colors, and bubble styles.
--   **Future-Ready:** The architecture is designed for planned features like emoji reactions, message scheduling, and custom chat sorting.
+- **Native macOS Experience:** Built with SwiftUI, notifications, drag & drop, and a native look & feel.
+
+- **Chats & Spaces:**
+  - View and manage all your chats; sort by recent activity.
+  - **Pinned chats** keep important conversations on top.
+  - Unread-message counters and a floating **"jump to first unread"** button.
+  - Filter chats by name; create new chats and start direct messages from the sidebar.
+  - **Member management** for groups: add/remove members and leave a chat.
+
+- **Messaging:**
+  - Send and receive text messages with inline images and files.
+  - **Mentions** via `@` with autocomplete.
+  - **Quoting:** quote any message (context menu) — the original is highlighted and scroll-to-origin is supported.
+  - **Edit and delete** your own messages.
+  - **Older history:** a "load previous messages" button at the top of the feed pages backwards through the entire conversation.
+
+- **Reactions:**
+  - Full reaction picker (Unicode 16.0, ~1900 emojis across 9 categories) with **search**.
+  - Quick-reaction menu with recently used emojis; live counts and per-user lists.
+
+- **Custom Emojis (optional, org-level):**
+  - Add your own icons from the message context menu ("Add icon…"), including animated GIFs and WebP – resized/transcoded automatically.
+  - Requires the **`chat.customemojis` scope** (Developer Preview), a Google Workspace domain and the feature enabled by the admin.
+
+- **Local archive & HTML export:**
+  - Messages of every chat you open are merged into a local archive (Application Support), together with downloaded attachments.
+  - One-click **export** of the current chat or of *all* archived chats to a `index.html + attachments/` folder:
+    - images inline (`<img>`), videos with an embedded player (`<video>`), other files as links;
+    - detected URLs become clickable links, reactions and quotes are preserved;
+    - very long histories are split into numbered parts (`part_2.html`, …) automatically;
+    - works offline for everything already archived; missing attachments are fetched when online.
+
+- **Notifications:** native macOS notifications for new messages (deduplicated), unread badge refresh in the background.
+
+- **Direct-message polish:** pending DM request banner, email-resolution of display names, avatar images.
 
 ## Getting Started
 
-Follow these steps to get your own instance of the client up and running.
+> **Prerequisite:** a Google Chat API requires a **paid Google Workspace account** (for example the *Business Starter* plan). Standard free `@gmail.com` accounts won't work.
+>
+> For development you may be able to use a free demo domain via the Google Cloud Partner Advantage program.
 
-### Prerequisites
+### 1. Create a Google Cloud project
 
-**1. A Paid Google Workspace Account**
+1. Open the [Google Cloud Console](https://console.cloud.google.com/) and create a project.
+2. Enable APIs under **APIs & Services → Library**: `Google Chat API` and `People API`.
+3. Under **OAuth consent screen** choose **External** (or **Internal** for your own org) and add the scopes:
 
-**This is the most critical requirement.** The Google Chat API is **not** available for standard free Gmail accounts (`@gmail.com`). You will need a Google Workspace subscription to use this client. The minimum plan is **Business Starter** (~$6 per user/month with annual commitment).
+   | Scope | Purpose |
+   | :--- | :--- |
+   | `chat.spaces.readonly` | List chats |
+   | `chat.spaces.create` | Create spaces |
+   | `chat.messages.readonly` | Read messages |
+   | `chat.messages` / `chat.messages.create` | Send, edit, delete messages |
+   | `chat.messages.reactions` | Add / remove reactions |
+   | `chat.memberships` | Manage members |
+   | `chat.customemojis` | Upload custom emojis (optional, Developer Preview) |
+   | `contacts.readonly` | Find users for mentions/DMs |
+   | `directory.readonly` | Resolve user names in your org (optional) |
+   | `userinfo.profile` / `userinfo.email` | Your own profile |
 
-> **Note:** For developers, you may be able to request a free demo domain through the Google Cloud Partner Advantage program to use for testing. These domains often include `dev.`, `demo.`, or `test.`.
+4. Under **Credentials → Create credentials → OAuth client ID** choose application type **macOS** and copy the **Client ID**.
 
-**2. Enable Required APIs & Create Credentials**
+### 2. Configure the client
 
-You will need to create a Google Cloud project and enable the necessary APIs to get a `Client ID`.
+Copy the local config template and paste your Client ID:
 
-**Step-by-Step Setup:**
+```bash
+cp GoogleChat/Config/GoogleChat.example.xcconfig GoogleChat/Config/GoogleChat.local.xcconfig
+# edit GoogleChat.local.xcconfig:
+#   GOOGLE_CLIENT_ID = <your-client-id>.apps.googleusercontent.com
+#   GOOGLE_REVERSED_CLIENT_ID = com.googleusercontent.apps.<your-client-id>
+```
 
-1.  **Create a Project:**
-    *   Go to the [Google Cloud Console](https://console.cloud.google.com/).
-    *   Create a new project or select an existing one.
+`GoogleChat.local.xcconfig` is **git-ignored** — never commit it. `Info.plist` bakes the reversed ID into the OAuth callback URL scheme at build time, so the local file must match the Client ID you sign in with. The Client ID can also be overridden later in the app's **Settings**.
 
-2.  **Enable Required APIs:**
-    *   Navigate to **APIs & Services** → **Library**.
-    *   Search for and **enable** the following APIs:
-        *   `Google Chat API`
-        *   `People API`
+### 3. Build & run
 
-3.  **Configure the OAuth Consent Screen:**
-    *   Go to **APIs & Services** → **OAuth consent screen**.
-    *   Choose **External** (or **Internal** if your app is only for your organization).
-    *   Fill in the required fields (App name, support email, etc.).
-    *   On the **Scopes** page, add the following permissions (scopes):
+Open `GoogleChat.xcodeproj` in Xcode and run, or build from the command line:
 
-        | Scope | Purpose |
-        | :--- | :--- |
-        | `.../auth/chat.spaces.readonly` | View list of chats |
-        | `.../auth/chat.messages.readonly` | Read messages |
-        | `.../auth/chat.messages.create` | Send messages |
-        | `.../auth/chat.spaces.create` | Create new spaces |
-        | `.../auth/contacts.readonly` | Search for users (for mentions) |
-        | `.../auth/userinfo.profile` | Get your profile info |
-        | `.../auth/chat.memberships.readonly` | View space members |
+```bash
+xcodebuild -project GoogleChat.xcodeproj -scheme GoogleChat \
+  -destination 'platform=macOS' build CODE_SIGNING_ALLOWED=NO
+```
 
-4.  **Create OAuth 2.0 Credentials:**
-    *   Go to **APIs & Services** → **Credentials**.
-    *   Click **+ CREATE CREDENTIALS** and select **OAuth client ID**.
-    *   Choose **Application type** → **macOS**.
-    *   Give it a name (e.g., `Google Chat Client`).
-    *   Click **Create** and copy the **Client ID** that appears.
+(GOOGLE Chat's API is fetched over HTTPS; codesigning is only needed for released builds.)
 
-### Installing and Configuring the Client
+## Privacy & Security
 
-1.  **Download the latest release** from the [Releases] https://github.com/kotulhu/google-chat-macos page.
-2.  Move the app to your `Applications` folder.
-3.  **First Launch:** When you open the app for the first time, it will prompt you to enter your **Client ID**.
-4.  **Enter the Client ID:** Paste the `Client ID` you copied from the Google Cloud Console into the settings field and save it.
-5.  **Sign In:** Click the "Sign in with Google" button to authenticate.
-
-That's it! The client will now load your chats.
+- OAuth tokens live in memory and the macOS keychain; they are **never stored in the repository**.
+- The local archive (`~/Library/Application Support/Gogol Chat/Archive/`) stays on your machine unless you export it.
+- The repository contains **no personal data or secrets** — real Client IDs live only in the ignored `GoogleChat.local.xcconfig`.
 
 ## Contributing
 
-Contributions are welcome! If you have ideas for improvements or new features, feel free to:
+Contributions are welcome! If you have ideas for improvements or new features:
 
 1.  Fork the repository.
 2.  Create a new branch (`git checkout -b feature/AmazingFeature`).
@@ -96,12 +113,12 @@ Contributions are welcome! If you have ideas for improvements or new features, f
 
 ## License
 
-Distributed under the MIT License. See `LICENSE.txt` for more information.
+Distributed under the MIT License. See `LICENSE` for more information.
 
 ## Acknowledgements
 
--   Google for providing the Chat API.
--   All contributors and users of this project.
+- Google for providing the Chat API.
+- All contributors and users of this project.
 
 ---
 **Disclaimer:**
