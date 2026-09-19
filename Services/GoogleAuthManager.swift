@@ -47,6 +47,7 @@ class GoogleAuthManager: ObservableObject {
             "https://www.googleapis.com/auth/userinfo.profile",
             "https://www.googleapis.com/auth/chat.memberships",
             "https://www.googleapis.com/auth/chat.messages.reactions",
+            "https://www.googleapis.com/auth/chat.customemojis",
             "https://www.googleapis.com/auth/directory.readonly"
         ]
         
@@ -125,6 +126,38 @@ class GoogleAuthManager: ObservableObject {
                 }
                 let granted = user.grantedScopes?.contains(scope) ?? false
                 print(granted ? "✅ directory.readonly scope granted" : "⚠️ scope still missing after consent")
+                continuation.resume(returning: granted)
+            }
+        }
+    }
+
+    /// Ensures the `chat.customemojis` scope is granted.  If the current
+    /// session does not contain it, presents the incremental-consent dialog.
+    /// Returns `true` when the scope is available.
+    func ensureCustomEmojiScopeIfNeeded() async -> Bool {
+        let scope = "https://www.googleapis.com/auth/chat.customemojis"
+
+        if let granted = GIDSignIn.sharedInstance.currentUser?.grantedScopes,
+           granted.contains(scope) {
+            print("✅ chat.customemojis scope already granted")
+            return true
+        }
+
+        guard let user = GIDSignIn.sharedInstance.currentUser,
+              let window = NSApplication.shared.windows.first else {
+            print("⚠️ ensureCustomEmojiScope: no user or window")
+            return false
+        }
+
+        return await withCheckedContinuation { continuation in
+            user.addScopes([scope], presenting: window) { _, error in
+                if let error = error {
+                    print("⚠️ addScopes failed: \(error.localizedDescription)")
+                    continuation.resume(returning: false)
+                    return
+                }
+                let granted = user.grantedScopes?.contains(scope) ?? false
+                print(granted ? "✅ chat.customemojis scope granted" : "⚠️ scope still missing after consent")
                 continuation.resume(returning: granted)
             }
         }

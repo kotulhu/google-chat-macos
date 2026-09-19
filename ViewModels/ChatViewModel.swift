@@ -18,10 +18,17 @@ class ChatViewModel: NSObject,ObservableObject {
     @Published var isSending = false
     /// Latest user-facing error message (localized by `L`).
     @Published var errorMessage: String?
+    /// True while an archive → HTML export is running.
+    @Published var isExporting = false
+    /// Set on a successful export; the UI reveals the folder in Finder.
+    @Published var exportResultURL: URL?
+    /// Localized export failure message.
+    @Published var exportError: String?
     /// Members of `selectedSpace`.
     @Published var currentSpaceMembers: [ChatUser] = []
     
     private var chatService: GoogleChatService?
+    private weak var authManager: GoogleAuthManager?
     
     private var pollTimer: Timer?
     
@@ -32,6 +39,13 @@ class ChatViewModel: NSObject,ObservableObject {
     
     
     @Published private(set) var accessToken: String = ""
+    
+    /// Whether the API has a next (older) page of messages for the current space.
+    @Published private(set) var hasMoreMessages = true
+    /// True while an older-page request is in flight (drives the top-of-feed spinner).
+    @Published private(set) var isLoadingPreviousMessages = false
+    /// Cursor for continuing the current space's message history backwards.
+    private var messagesPageToken: String?
     
     private var sentNotificationIds = Set<String>()
     
@@ -191,6 +205,7 @@ class ChatViewModel: NSObject,ObservableObject {
     /// chat service, resets transient caches and starts background refresh.
     func configure(with token: String, authManager: GoogleAuthManager) {
         self.accessToken = token
+        self.authManager = authManager
         self.currentUserEmail = authManager.userEmail
         self.currentUserName = ConfigManager.shared.localDisplayName.isEmpty
             ? authManager.userName
@@ -285,7 +300,7 @@ class ChatViewModel: NSObject,ObservableObject {
             for space in spaces {
                 group.addTask {
                     do {
-                        let messages = try await service.fetchMessages(spaceId: space.id, pageSize: 20)
+                        let messages = try await service.fetchMessages(spaceId: space.id, pageSize: 20).messages
                         return (space.id, messages)
                     } catch {
                         return (space.id, [])
@@ -356,7 +371,11 @@ class ChatViewModel: NSObject,ObservableObject {
         
         do {
             PerfBeacon.start("Lenta", phase: "fetch")
-            let fetchedMessages = try await service.fetchMessages(spaceId: space.id)
+            let page = try await service.fetchMessages(spaceId: space.id)
+            let fetchedMessages = page.messages
+            messagesPageToken = page.nextPageToken
+            hasMoreMessages = page.nextPageToken != nil
+            isLoadingPreviousMessages = false
             PerfBeacon.end("Lenta", phase: "fetch", detail: "count=\(fetchedMessages.count)")
             accessToken = service.currentAccessToken
             
@@ -431,7 +450,55 @@ class ChatViewModel: NSObject,ObservableObject {
                 print("⚠️ Could not refresh messages from network, showing cache: \(error)")
             }
         }
+        ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
         PerfBeacon.end("Lenta", phase: "loadMessages", detail: space.name)
+    }
+
+    /// Loads one more page of older messages and appends it to the feed.
+    /// Uses the page cursor captured when the current space was first loaded.
+    func loadPreviousMessages() async {
+        guard let service = chatService,
+              let space = selectedSpace,
+              !isLoadingPreviousMessages,
+              hasMoreMessages,
+              let pageToken = messagesPageToken, !pageToken.isEmpty else {
+            return
+        }
+        isLoadingPreviousMessages = true
+        defer { isLoadingPreviousMessages = false }
+
+        do {
+            let page = try await service.fetchMessages(spaceId: space.id, pageToken: pageToken)
+            let existingIds = Set(messages.map(\.id))
+            var older = page.messages.filter { !existingIds.contains($0.id) }
+            guard !older.isEmpty else {
+                hasMoreMessages = false
+                return
+            }
+            
+            let senderIds = Set(older.compactMap { $0.senderId }.filter { !$0.isEmpty })
+            await nameResolver.resolve(userIds: senderIds)
+            for var msg in older {
+                if let senderId = msg.senderId, !msg.isFromMe {
+                    msg.authorName = nameResolver.displayName(for: senderId)
+                } else {
+                    msg.authorName = currentUserDisplayName
+                }
+                if let cached = reactionCache[msg.id] {
+                    msg.reactions = cached
+                }
+            }
+            
+            messages.append(contentsOf: older)
+            messagesPageToken = page.nextPageToken
+            hasMoreMessages = page.nextPageToken != nil
+            ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
+            PerfBeacon.mark("Lenta", phase: "loadPrevious", detail: "added=\(older.count), total=\(messages.count)")
+        } catch {
+            guard !isCancellation(error) else { return }
+            print("❌ Failed to load previous messages: \(error)")
+            errorMessage = L.str("err.load.previous", error.localizedDescription)
+        }
     }
 
     /// Rewrites messages authored by the legacy "Native Mac Client" marker so
@@ -961,6 +1028,106 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
+    /// Ensures the `chat.customemojis` scope is granted (presents the consent
+    /// dialog when missing). Returns `true` when available for upload.
+    func ensureCustomEmojiScope() async -> Bool {
+        guard let authManager else { return false }
+        return await authManager.ensureCustomEmojiScopeIfNeeded()
+    }
+
+    /// Presents a folder chooser and exports the local message + media archive
+    /// as a set of standalone HTML files (current chat or every archived chat).
+    func exportArchive(allChats: Bool) {
+        guard !isExporting, !isSending else { return }
+        guard selectedSpace != nil else { return }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.title = L.str("export.panel.title")
+        panel.prompt = L.str("export.choose")
+        panel.begin { [weak self] response in
+            guard let self, response == .OK, let folder = panel.url else { return }
+            self.startArchiveExport(allChats: allChats, folder: folder)
+        }
+    }
+
+    private func startArchiveExport(allChats: Bool, folder: URL) {
+        isExporting = true
+        exportResultURL = nil
+        exportError = nil
+
+        // Fold the live feed (incl. pages loaded so far) into the archive even
+        // if nothing has flushed to disk yet.
+        if !allChats, let space = selectedSpace {
+            ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
+        }
+        let batches = buildExportBatches(allChats: allChats)
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                let result = try await ArchiveExporter.export(spaces: batches, to: folder)
+                await MainActor.run {
+                    self.exportResultURL = result
+                    self.isExporting = false
+                    print("✅ Archive exported to \(result.path)")
+                }
+            } catch {
+                await MainActor.run {
+                    self.exportError = error.localizedDescription
+                    self.isExporting = false
+                    print("❌ Archive export failed: \(error)")
+                }
+            }
+        }
+    }
+
+    private func buildExportBatches(allChats: Bool) -> [ArchiveBatchSpace] {
+        if allChats {
+            return ArchiveStore.shared.summaries().compactMap { summary in
+                guard let messages = ArchiveStore.shared.messages(forSpaceId: summary.spaceId) else { return nil }
+                return ArchiveBatchSpace(
+                    spaceId: summary.spaceId,
+                    spaceName: summary.spaceName,
+                    updatedAt: summary.updatedAt,
+                    messages: messages
+                )
+            }
+        }
+        guard let space = selectedSpace,
+              let messages = ArchiveStore.shared.messages(forSpaceId: space.id) else {
+            return []
+        }
+        return [ArchiveBatchSpace(
+            spaceId: space.id,
+            spaceName: space.name,
+            updatedAt: Date(),
+            messages: messages
+        )]
+    }
+
+    /// Clears the result so the UI is ready for the next export (called after
+    /// the folder was revealed in Finder).
+    func clearExportResult() {
+        exportResultURL = nil
+    }
+
+    /// Dismisses the in-window export error banner.
+    func clearExportError() {
+        exportError = nil
+    }
+
+    /// Uploads a new custom emoji to the organization (Developer Preview).
+    func createCustomEmoji(emojiName: String, data: Data, filename: String) async throws -> GoogleChatService.UploadedCustomEmoji? {
+        guard let service = chatService else {
+            throw NSError(domain: "CustomEmoji", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: "Service not configured"])
+        }
+        return try await service.createCustomEmoji(emojiName: emojiName, data: data, filename: filename)
+    }
+
     /// Mutates the in-memory reactions of a message and notifies observers.
     private func applyReactions(_ reactions: [MessageReaction], to messageId: String) {
         reactionCache[messageId] = reactions
@@ -968,6 +1135,9 @@ class ChatViewModel: NSObject,ObservableObject {
             PerfBeacon.measure("React", phase: "applyReactions", minMs: 1, detail: "count=\(reactions.count)") {
                 messages[index].reactions = reactions
                 objectWillChange.send()
+            }
+            if let space = selectedSpace {
+                ArchiveStore.shared.mergeMessage(spaceId: space.id, message: messages[index])
             }
         }
     }
@@ -1135,7 +1305,7 @@ class ChatViewModel: NSObject,ObservableObject {
             if selectedSpace?.id == space.id { continue }
             
             do {
-                let latestMessages = try await service.fetchMessages(spaceId: space.id, pageSize: 1)
+                let latestMessages = try await service.fetchMessages(spaceId: space.id, pageSize: 1).messages
                 guard let lastMessage = latestMessages.first else { continue }
                 
                 if let idx = spaces.firstIndex(where: { $0.id == space.id }) {

@@ -166,12 +166,19 @@ class GoogleChatService {
         return ChatSpace(id: created.name, name: created.displayName ?? L.str("space.unnamed"), type: type, lastMessage: nil)
     }
     
-    func fetchMessages(spaceId: String, pageSize: Int = 100) async throws -> [Message] {
+    /// Fetches a page of messages (newest first).  Passing the `pageToken` returned
+    /// by the previous call continues to older messages, so a feed can be
+    /// progressively loaded backwards.
+    func fetchMessages(spaceId: String, pageSize: Int = 100, pageToken: String? = nil) async throws -> (messages: [Message], nextPageToken: String?) {
         var components = URLComponents(string: "\(baseURL)\(spaceId)/messages")
-        components?.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "pageSize", value: "\(pageSize)"),
             URLQueryItem(name: "orderBy", value: "createTime desc")
         ]
+        if let pageToken, !pageToken.isEmpty {
+            queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
+        }
+        components?.queryItems = queryItems
         
         guard let url = components?.url else { throw URLError(.badURL) }
         
@@ -183,6 +190,7 @@ class GoogleChatService {
         
         struct MessagesResponse: Decodable {
             let messages: [MessageItem]?
+            let nextPageToken: String?
         }
         
         struct MessageItem: Decodable {
@@ -277,7 +285,7 @@ class GoogleChatService {
         } ?? []
         
         PerfBeacon.end("Net", phase: "fetchMessages:decode", detail: "count=\(messages.count)")
-        return messages
+        return (messages: messages, nextPageToken: decodedResponse.nextPageToken)
     }
 
     private var displayNameForCurrentUser: String {
@@ -1036,6 +1044,40 @@ class GoogleChatService {
             result[userId] = ResolvedProfile(displayName: displayName, photoURL: photoURL, email: email)
         }
         return result
+    }
+    
+    /// A successfully-created org custom emoji (Developer Preview).
+    struct UploadedCustomEmoji: Decodable {
+        let name: String?
+        let uid: String?
+        let emojiName: String?
+    }
+
+    /// Uploads a new custom emoji to the organization via the
+    /// `customEmojis.create` endpoint (Developer Preview, Workspace-only).
+    /// `data` must already be png/jpg/gif; the server whitelists those formats.
+    func createCustomEmoji(emojiName: String, data: Data, filename: String) async throws -> UploadedCustomEmoji {
+        guard let url = URL(string: baseURL + "customEmojis") else { throw URLError(.badURL) }
+
+        let resource: [String: Any] = [
+            "emojiName": emojiName,
+            "payload": [
+                "filename": filename,
+                "fileContent": data.base64EncodedString()
+            ]
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: resource)
+        print("[Diag] create custom emoji: emojiName=\(emojiName), filename=\(filename), bytes=\(data.count)")
+
+        let (data, response) = try await authorizedData(for: request)
+        try validateHTTPResponse(response, data: data, domain: "CustomEmojiCreate")
+        let decoded = try JSONDecoder().decode(UploadedCustomEmoji.self, from: data)
+        print("✅ Custom emoji created: \(decoded.emojiName ?? "?") / \(decoded.name ?? "?") / uid=\(decoded.uid ?? "?")")
+        return decoded
     }
     
     /// Throws a descriptive error when the HTTP response is not a 2xx status.

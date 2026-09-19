@@ -14,6 +14,8 @@ struct MessageBubbleView: View {
     var onEdit: ((Message) -> Void)? = nil
     var onDelete: ((Message) -> Void)? = nil
     var onQuote: ((Message) -> Void)? = nil
+    /// Opens the "add custom icon" upload sheet.
+    var onAddCustomIcon: (() -> Void)? = nil
     /// Looks up the live message for a quoted id in the current feed.
     var resolveQuotedMessage: ((String) -> Message?)? = nil
     /// Scrolls the feed to the original message of a quote.
@@ -138,6 +140,10 @@ if let quoted = message.quotedMessage {
             Divider()
             Button(L.str("more.reactions")) {
                 showReactionPicker = true
+            }
+            Divider()
+            Button(L.str("add.custom.icon")) {
+                onAddCustomIcon?()
             }
         }
         .sheet(isPresented: $showReactionPicker) {

@@ -66,12 +66,14 @@ struct AttachmentView: View {
         do {
             let (data, _) = try await URLSession.shared.data(from: loadURL)
             imageData = data
+            archiveMedia(data)
         } catch {
             print("Failed to load image: \(error)")
         }
     }
 
-    /// Presents a save panel and writes the downloaded file to disk.
+    /// Presents a save panel and writes the downloaded file to disk, also
+    /// capturing the bytes into the local archive for future HTML exports.
     private func downloadFile(_ url: URL) {
         let savePanel = NSSavePanel()
         savePanel.nameFieldStringValue = attachment.name
@@ -81,12 +83,24 @@ struct AttachmentView: View {
                     do {
                         let (data, _) = try await URLSession.shared.data(from: url)
                         try data.write(to: saveURL)
+                        self.archiveMedia(data)
                     } catch {
                         print("Failed to save: \(error)")
                     }
                 }
             }
         }
+    }
+
+    /// Stores attachment bytes (deduplicated by attachment id) into the local
+    /// archive; skipped for empty payloads.
+    private func archiveMedia(_ data: Data) {
+        _ = ArchiveStore.shared.storeMedia(
+            data: data,
+            attachmentId: attachment.id,
+            mimeType: attachment.mimeType,
+            originalName: attachment.name
+        )
     }
 
     /// Formats a byte count using the system file-size formatter.

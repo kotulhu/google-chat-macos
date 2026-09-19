@@ -247,16 +247,49 @@ struct ChatDetailView: View {
     @State private var editingMessage: Message?
     @State private var editingText = ""
     @State private var quotedDraft: Message?
+    @State private var isAddCustomEmojiOpen = false
     
     var body: some View {
         VStack(spacing: 0) {
             headerBar
             requestPendingBanner
+            exportErrorBanner
             messageList
             mentionBar
             attachmentStrip
             quoteStrip
             composerBar
+        }
+        .onChange(of: chatVM.exportResultURL) { url in
+            guard let url else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            chatVM.clearExportResult()
+        }
+        .sheet(isPresented: $isAddCustomEmojiOpen) {
+            AddCustomEmojiView(chatVM: chatVM)
+        }
+    }
+
+    /// Banner shown when an archive export fails (dismissed manually).
+    private var exportErrorBanner: some View {
+        Group {
+            if let exportError = chatVM.exportError {
+                HStack(spacing: 8) {
+                    Label(exportError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                    Spacer()
+                    Button(L.str("general.ok")) {
+                        chatVM.clearExportError()
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.1))
+                .overlay(Divider(), alignment: .bottom)
+            }
         }
     }
 
@@ -284,6 +317,25 @@ struct ChatDetailView: View {
                 .font(.headline)
             
             Spacer()
+            
+            Menu {
+                Button {
+                    chatVM.exportArchive(allChats: false)
+                } label: {
+                    Label(L.str("export.current"), systemImage: "square.and.arrow.up")
+                }
+                Button {
+                    chatVM.exportArchive(allChats: true)
+                } label: {
+                    Label(L.str("export.all"), systemImage: "square.and.arrow.up.fill")
+                }
+            } label: {
+                Label(L.str("export.menu"), systemImage: "archivebox")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(L.str("export.menu"))
             
             if space.type != .direct {
                 Button {
@@ -314,6 +366,7 @@ struct ChatDetailView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
+                    topHistoryBar
                     ForEach(chatVM.messages.reversed()) { message in
                         messageRow(message, proxy: proxy)
                     }
@@ -333,10 +386,43 @@ struct ChatDetailView: View {
             jumpToUnreadButton
         }
         .overlay {
-            if chatVM.isLoading || chatVM.isSending {
+            if chatVM.isExporting {
+                VStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.regular)
+                    Text(L.str("export.exporting"))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(16)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            } else if chatVM.isLoading || chatVM.isSending {
                 ProgressView()
                     .controlSize(.large)
             }
+        }
+    }
+
+    /// Bar at the very top of the feed: a button to load the previous page of
+    /// older messages, replaced by a spinner while that request is in flight.
+    @ViewBuilder private var topHistoryBar: some View {
+        if chatVM.hasMoreMessages || chatVM.isLoadingPreviousMessages {
+            HStack {
+                Spacer()
+                if chatVM.isLoadingPreviousMessages {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button {
+                        Task { await chatVM.loadPreviousMessages() }
+                    } label: {
+                        Label(L.str("history.load.previous"), systemImage: "arrow.up.circle")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 6)
         }
     }
 
@@ -407,6 +493,9 @@ struct ChatDetailView: View {
             },
             onQuote: { message in
                 quotedDraft = message
+            },
+            onAddCustomIcon: {
+                isAddCustomEmojiOpen = true
             },
             resolveQuotedMessage: { quotedId in
                 chatVM.messages.first { $0.id == quotedId }
