@@ -99,7 +99,7 @@ enum ArchiveExporter {
 
     private static func ensureAttachment(_ attachment: Attachment, attachmentsDir: URL, fetchMissing: Bool) async -> String? {
         let id = attachment.id
-        if let stored = ArchiveStore.shared.mediaStoredName(attachmentId: id) {
+        if let stored = await ArchiveStore.shared.mediaStoredName(attachmentId: id) {
             let dest = attachmentsDir.appendingPathComponent(stored)
             if !FileManager.default.fileExists(atPath: dest.path),
                let data = ArchiveStore.shared.mediaData(storedName: stored) {
@@ -114,7 +114,7 @@ enum ArchiveExporter {
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             guard !data.isEmpty else { return nil }
-            let stored = ArchiveStore.shared.storeMedia(
+            let stored = await ArchiveStore.shared.storeMedia(
                 data: data,
                 attachmentId: id,
                 mimeType: attachment.mimeType,

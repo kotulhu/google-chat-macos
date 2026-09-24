@@ -66,7 +66,7 @@ struct AttachmentView: View {
         do {
             let (data, _) = try await URLSession.shared.data(from: loadURL)
             imageData = data
-            archiveMedia(data)
+            await archiveMedia(data)
         } catch {
             print("Failed to load image: \(error)")
         }
@@ -83,7 +83,7 @@ struct AttachmentView: View {
                     do {
                         let (data, _) = try await URLSession.shared.data(from: url)
                         try data.write(to: saveURL)
-                        self.archiveMedia(data)
+                        await self.archiveMedia(data)
                     } catch {
                         print("Failed to save: \(error)")
                     }
@@ -94,8 +94,8 @@ struct AttachmentView: View {
 
     /// Stores attachment bytes (deduplicated by attachment id) into the local
     /// archive; skipped for empty payloads.
-    private func archiveMedia(_ data: Data) {
-        _ = ArchiveStore.shared.storeMedia(
+    private func archiveMedia(_ data: Data) async {
+        _ = await ArchiveStore.shared.storeMedia(
             data: data,
             attachmentId: attachment.id,
             mimeType: attachment.mimeType,

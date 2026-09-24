@@ -159,5 +159,17 @@ public enum RussianStrings {
         "export.doc.quote": "Цитата",
         "export.link.original": "Исходный файл",
         "export.missing": "не скачано",
+
+        // Отложенная отправка
+        "schedule.later": "Отправить позже",
+        "schedule.later.help": "Запланировать отправку сообщения на выбранное время",
+        "schedule.blocked": "В этом чате уже есть отложенное сообщение",
+        "schedule.date": "Выберите дату и время отправки",
+        "schedule.confirm": "Запланировать",
+        "schedule.planned": "Отправка запланирована на %@",
+        "schedule.attachments": "%@ вложений",
+        "schedule.cancel": "Отменить отложенную отправку",
+        "schedule.overdue": "Не отправлено вовремя",
+        "schedule.overdue.hint": "Приложение было закрыто к моменту отправки. Сообщение не отправлено и будет удалено через несколько секунд.",
     ]
 }

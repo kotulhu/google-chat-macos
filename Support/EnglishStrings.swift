@@ -158,5 +158,17 @@ public enum EnglishStrings {
         "export.doc.quote": "Quote",
         "export.link.original": "Source file",
         "export.missing": "not downloaded",
+
+        // Scheduled messages
+        "schedule.later": "Send later",
+        "schedule.later.help": "Schedule this message to be sent at a chosen time",
+        "schedule.blocked": "A scheduled message already exists in this chat",
+        "schedule.date": "Choose the send date and time",
+        "schedule.confirm": "Schedule",
+        "schedule.planned": "Scheduled for %@",
+        "schedule.attachments": "%@ attachments",
+        "schedule.cancel": "Cancel scheduled message",
+        "schedule.overdue": "Not sent on time",
+        "schedule.overdue.hint": "The app was closed when the send time passed. The message was not sent and will be removed in a few seconds.",
     ]
 }

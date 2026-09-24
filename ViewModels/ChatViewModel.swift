@@ -79,6 +79,15 @@ class ChatViewModel: NSObject,ObservableObject {
         await self?.loadReactions(for: messageId, force: true)
     }
 
+    /// Watches the local queue and fires scheduled messages whose time arrived,
+    /// reusing the regular send/upload path.
+    private lazy var scheduledMessagesService = ScheduledMessageService(
+        store: ScheduledMessageStore.shared
+    ) { [weak self] message in
+        guard let self else { return false }
+        return await self.sendScheduledMessage(message)
+    }
+
     override init() {
         super.init()
         
@@ -236,6 +245,12 @@ class ChatViewModel: NSObject,ObservableObject {
         Task {
             await setCurrentUserId()
         }
+        
+        // Mark scheduled messages whose time passed while the app was closed
+        // as overdue (they are NOT re-sent on launch), then start watching the
+        // queue for entries that become due now.
+        ScheduledMessageStore.shared.markOverdueForPastDue()
+        scheduledMessagesService.start()
         
         startBackgroundRefresh()
     }
@@ -450,7 +465,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 print("⚠️ Could not refresh messages from network, showing cache: \(error)")
             }
         }
-        ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
+        await ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
         PerfBeacon.end("Lenta", phase: "loadMessages", detail: space.name)
     }
 
@@ -492,7 +507,7 @@ class ChatViewModel: NSObject,ObservableObject {
             messages.append(contentsOf: older)
             messagesPageToken = page.nextPageToken
             hasMoreMessages = page.nextPageToken != nil
-            ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
+            await ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
             PerfBeacon.mark("Lenta", phase: "loadPrevious", detail: "added=\(older.count), total=\(messages.count)")
         } catch {
             guard !isCancellation(error) else { return }
@@ -550,6 +565,7 @@ class ChatViewModel: NSObject,ObservableObject {
         stopTokenRefreshTimer()
         stopBackgroundCheck()
         stopSpacesRefresh()
+        scheduledMessagesService.stop()
         directChatUserMapping.removeAll()
         reactionCache.removeAll()
         loadingReactionMessageIds.removeAll()
@@ -913,6 +929,87 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
+    /// Sends a scheduled message whose time has arrived, reusing the existing
+    /// upload + send path. Attachment files are re-uploaded at fire time
+    /// (upload tokens are short-lived); missing files are skipped. Returns
+    /// whether the queue entry can be removed.
+    func sendScheduledMessage(_ message: ScheduledMessage) async -> Bool {
+        guard let service = chatService,
+              let space = spaces.first(where: { $0.id == message.spaceId }) else {
+            return false
+        }
+        var tokens: [String] = []
+        for path in message.attachmentFileURLs {
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            do {
+                tokens.append(try await uploadFile(fileURL: URL(fileURLWithPath: path), to: space.id))
+            } catch {
+                print("⚠️ Failed to upload scheduled attachment \(path): \(error)")
+            }
+        }
+        let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            if tokens.isEmpty {
+                try await service.sendMessage(
+                    spaceId: space.id,
+                    text: trimmed,
+                    quotedMessageId: message.quotedMessageId,
+                    quotedLastUpdateTime: message.quotedLastUpdateTime
+                )
+            } else {
+                try await service.sendMessageWithAttachments(
+                    spaceId: space.id,
+                    text: trimmed,
+                    attachmentUploadTokens: tokens,
+                    quotedMessageId: message.quotedMessageId,
+                    quotedLastUpdateTime: message.quotedLastUpdateTime
+                )
+            }
+            await loadMessages(for: space)
+            return true
+        } catch {
+            print("❌ Failed to send scheduled message: \(error)")
+            return false
+        }
+    }
+
+    /// Queues a message to be sent later (max one per space; date must be in
+    /// the future). Returns whether the message was scheduled.
+    func scheduleMessage(spaceId: String, text: String, attachments: [URL], quotedMessageId: String?, quotedLastUpdateTime: String?, at date: Date) -> Bool {
+        guard date > Date(),
+              ScheduledMessageStore.shared.message(forSpaceId: spaceId) == nil else {
+            return false
+        }
+        ScheduledMessageStore.shared.schedule(ScheduledMessage(
+            id: UUID().uuidString,
+            spaceId: spaceId,
+            text: text,
+            attachmentFileURLs: attachments.map(\.path),
+            quotedMessageId: quotedMessageId,
+            quotedLastUpdateTime: quotedLastUpdateTime,
+            scheduledAt: date,
+            status: .pending
+        ))
+        print("⏰ Scheduled message for \(spaceId) at \(date)")
+        return true
+    }
+
+    /// Cancels the scheduled (or overdue) message of a space, freeing the slot.
+    func cancelScheduledMessage(in spaceId: String) {
+        ScheduledMessageStore.shared.remove(spaceId: spaceId)
+    }
+
+    /// Called when a chat containing an overdue scheduled message is opened:
+    /// the entry blinks and then removes itself after ~10 seconds without
+    /// sending and without user interaction.
+    func handleScheduledForOpenedSpace(_ spaceId: String) {
+        guard ScheduledMessageStore.shared.message(forSpaceId: spaceId)?.status == .overdue else { return }
+        Task {
+            try? await Task.sleep(for: .seconds(10))
+            ScheduledMessageStore.shared.remove(spaceId: spaceId)
+        }
+    }
+
     /// Updates the text of an existing message and reloads the thread.
     @discardableResult
     func updateMessage(_ message: Message, text: String) async -> Bool {
@@ -1050,21 +1147,25 @@ class ChatViewModel: NSObject,ObservableObject {
         panel.prompt = L.str("export.choose")
         panel.begin { [weak self] response in
             guard let self, response == .OK, let folder = panel.url else { return }
-            self.startArchiveExport(allChats: allChats, folder: folder)
+            Task {
+                await self.startArchiveExport(allChats: allChats, folder: folder)
+            }
         }
     }
 
-    private func startArchiveExport(allChats: Bool, folder: URL) {
+    private func startArchiveExport(allChats: Bool, folder: URL) async {
         isExporting = true
         exportResultURL = nil
         exportError = nil
 
         // Fold the live feed (incl. pages loaded so far) into the archive even
-        // if nothing has flushed to disk yet.
+        // if nothing has flushed to disk yet, then make every pending write
+        // durable so the exported files match the store exactly.
         if !allChats, let space = selectedSpace {
-            ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
+            await ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
         }
-        let batches = buildExportBatches(allChats: allChats)
+        await ArchiveStore.shared.flushNow()
+        let batches = await buildExportBatches(allChats: allChats)
 
         Task.detached(priority: .userInitiated) {
             do {
@@ -1084,20 +1185,21 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
-    private func buildExportBatches(allChats: Bool) -> [ArchiveBatchSpace] {
+    private func buildExportBatches(allChats: Bool) async -> [ArchiveBatchSpace] {
         if allChats {
-            return ArchiveStore.shared.summaries().compactMap { summary in
-                guard let messages = ArchiveStore.shared.messages(forSpaceId: summary.spaceId) else { return nil }
-                return ArchiveBatchSpace(
+            var batches: [ArchiveBatchSpace] = []
+            for summary in await ArchiveStore.shared.summaries() {
+                guard let messages = await ArchiveStore.shared.messages(forSpaceId: summary.spaceId) else { continue }
+                batches.append(ArchiveBatchSpace(
                     spaceId: summary.spaceId,
                     spaceName: summary.spaceName,
                     updatedAt: summary.updatedAt,
                     messages: messages
-                )
+                ))
             }
+            return batches
         }
-        guard let space = selectedSpace,
-              let messages = ArchiveStore.shared.messages(forSpaceId: space.id) else {
+        guard let space = selectedSpace, let messages = await ArchiveStore.shared.messages(forSpaceId: space.id) else {
             return []
         }
         return [ArchiveBatchSpace(
@@ -1137,7 +1239,9 @@ class ChatViewModel: NSObject,ObservableObject {
                 objectWillChange.send()
             }
             if let space = selectedSpace {
-                ArchiveStore.shared.mergeMessage(spaceId: space.id, message: messages[index])
+                Task {
+                    await ArchiveStore.shared.mergeMessage(spaceId: space.id, message: messages[index])
+                }
             }
         }
     }

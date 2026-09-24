@@ -36,25 +36,26 @@ struct MediaEntry: Codable {
 ///   - `manifest.json`                 — attachment id → media entry map
 ///   - `index.json`                    — per-space summaries for the export list
 ///
-/// Everything funnels through a private serial queue. In-memory state is
-/// updated immediately and flushed to disk after a short debounce, so rapid
-/// reaction/scroll churn does not hammer the filesystem.
-final class ArchiveStore {
+/// The store is a Swift actor: all in-memory state is mutated on its own
+/// executor, which rules out the cross-thread array aliasing that could crash
+/// the app. Writes are debounced through a single `Task` and only spaces whose
+/// contents actually changed are rewritten to disk.
+actor ArchiveStore {
     static let shared = ArchiveStore()
 
-    private let rootDir: URL
-    private let spacesDir: URL
-    private let mediaDir: URL
+    nonisolated private let rootDir: URL
+    nonisolated private let spacesDir: URL
+    nonisolated private let mediaDir: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    private let queue = DispatchQueue(label: "gogolchatsuite.archive", qos: .utility)
     private var spaces: [String: SpaceArchive] = [:]
     private var summaryByID: [String: SpaceArchiveSummary] = [:]
     private var mediaEntries: [String: MediaEntry] = [:]
-    private var pendingFlush: DispatchWorkItem?
+    private var dirtySpaceIDs: Set<String> = []
+    private var flushTask: Task<Void, Never>?
 
-    private init() {
+    init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         rootDir = appSupport.appendingPathComponent("Gogol Chat/Archive", isDirectory: true)
@@ -70,46 +71,62 @@ final class ArchiveStore {
     }
 
     /// The archive root directory (exposed for debugging/tests).
-    var archiveRootURL: URL { rootDir }
+    nonisolated var archiveRootURL: URL { rootDir }
 
     // MARK: - Message merging
 
     /// Merges a page of messages into the archive of a space (union by id,
-    /// newest wins). Safe to call repeatedly with overlapping pages.
+    /// newest wins). Only marks the space dirty when the incoming page actually
+    /// changed anything, so routine 60-second polls stay cheap.
     func merge(spaceId: String, spaceName: String, messages incoming: [Message]) {
-        guard !spaceId.isEmpty else { return }
-        queue.async { [self] in
-            var archive = spaces[spaceId] ?? SpaceArchive(spaceId: spaceId, spaceName: spaceName, updatedAt: Date(), messages: [])
-            archive.spaceName = spaceName
-            var byID: [String: Message] = [:]
-            for message in archive.messages {
-                byID[message.id] = message
-            }
-            for message in incoming {
-                byID[message.id] = message
-            }
-            let merged = Array(byID.values)
-            archive.messages = merged.sorted { ($0.timestamp, $0.id) > ($1.timestamp, $1.id) }
-            archive.updatedAt = Date()
-            spaces[spaceId] = archive
-            summaryByID[spaceId] = SpaceArchiveSummary(
-                spaceId: spaceId,
-                spaceName: spaceName,
-                messageCount: merged.count,
-                updatedAt: archive.updatedAt
-            )
-            scheduleFlush()
+        guard !spaceId.isEmpty, !incoming.isEmpty else { return }
+        var archive = spaces[spaceId] ?? loadSpace(spaceId)
+            ?? SpaceArchive(spaceId: spaceId, spaceName: spaceName, updatedAt: Date(), messages: [])
+        archive.spaceName = spaceName
+        var byID: [String: Message] = [:]
+        for message in archive.messages {
+            byID[message.id] = message
         }
+        var changed = false
+        for message in incoming {
+            if let existing = byID[message.id] {
+                if existing != message {
+                    changed = true
+                }
+            } else {
+                changed = true
+            }
+            byID[message.id] = message
+        }
+        guard changed else { return }
+        let merged = Array(byID.values)
+        archive.messages = merged.sorted { ($0.timestamp, $0.id) > ($1.timestamp, $1.id) }
+        archive.updatedAt = Date()
+        spaces[spaceId] = archive
+        summaryByID[spaceId] = SpaceArchiveSummary(
+            spaceId: spaceId,
+            spaceName: spaceName,
+            messageCount: merged.count,
+            updatedAt: archive.updatedAt
+        )
+        dirtySpaceIDs.insert(spaceId)
+        scheduleFlush()
     }
 
     /// Merges a single (possibly updated) message — e.g. after a reaction toggle.
     func mergeMessage(spaceId: String, message: Message) {
+        guard !spaceId.isEmpty else { return }
+        if spaces[spaceId] == nil {
+            spaces[spaceId] = loadSpace(spaceId)
+        }
         merge(spaceId: spaceId, spaceName: spaces[spaceId]?.spaceName ?? message.authorName, messages: [message])
     }
 
     /// Applies any still-pending writes right away (used before exporting).
-    func flushNow() {
-        queue.sync { flushLocked() }
+    func flushNow() async {
+        flushTask?.cancel()
+        flushTask = nil
+        persistLocked(dirtyOnly: false)
     }
 
     // MARK: - Media
@@ -120,50 +137,45 @@ final class ArchiveStore {
     @discardableResult
     func storeMedia(data: Data, attachmentId: String, mimeType: String, originalName: String) -> String? {
         guard !attachmentId.isEmpty, !data.isEmpty else { return nil }
-        let storedName = Self.mediaStoredName(for: attachmentId, mimeType: mimeType, originalName: originalName)
-        queue.async { [self] in
-            if let existing = mediaEntries[attachmentId],
-               existing.size == Int64(data.count),
-               FileManager.default.fileExists(atPath: mediaDir.appendingPathComponent(existing.storedName).path) {
-                return
-            }
-            try? data.write(to: mediaDir.appendingPathComponent(storedName), options: [.atomic])
-            mediaEntries[attachmentId] = MediaEntry(
-                attachmentId: attachmentId,
-                originalName: originalName,
-                contentType: mimeType,
-                size: Int64(data.count),
-                storedName: storedName
-            )
-            scheduleFlush()
+        if let existing = mediaEntries[attachmentId],
+           existing.size == Int64(data.count),
+           FileManager.default.fileExists(atPath: mediaDir.appendingPathComponent(existing.storedName).path) {
+            return existing.storedName
         }
+        let storedName = Self.mediaStoredName(for: attachmentId, mimeType: mimeType, originalName: originalName)
+        let url = mediaDir.appendingPathComponent(storedName)
+        guard (try? data.write(to: url, options: [.atomic])) != nil else { return nil }
+        mediaEntries[attachmentId] = MediaEntry(
+            attachmentId: attachmentId,
+            originalName: originalName,
+            contentType: mimeType,
+            size: Int64(data.count),
+            storedName: storedName
+        )
+        scheduleFlush()
         return storedName
     }
 
-    /// The deterministic media file name for an attachment id (no disk IO).
+    /// The stored media file name for an attachment id, when already archived.
     func mediaStoredName(attachmentId: String) -> String? {
-        queue.sync {
-            mediaEntries[attachmentId]?.storedName
-        }
+        mediaEntries[attachmentId]?.storedName
     }
 
-    /// Raw bytes of a stored media file, or nil when missing.
-    func mediaData(storedName: String) -> Data? {
+    /// Raw bytes of a stored media file, or nil when missing (pure disk read).
+    nonisolated func mediaData(storedName: String) -> Data? {
         let url = mediaDir.appendingPathComponent(storedName)
-        return queue.sync {
-            try? Data(contentsOf: url)
-        }
+        return try? Data(contentsOf: url)
     }
 
     /// Deterministic file name inside `media/` for an attachment id.
-    static func mediaStoredName(for attachmentId: String, mimeType: String, originalName: String) -> String {
+    nonisolated static func mediaStoredName(for attachmentId: String, mimeType: String, originalName: String) -> String {
         let hash = SHA256.hash(data: Data(attachmentId.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
         return "\(hash).\(fileExtension(forMIME: mimeType, originalName: originalName))"
     }
 
-    private static func fileExtension(forMIME mimeType: String, originalName: String) -> String {
+    private nonisolated static func fileExtension(forMIME mimeType: String, originalName: String) -> String {
         let mapped: [String: String] = [
             "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
             "image/webp": "webp", "image/heic": "heic", "video/mp4": "mp4",
@@ -181,53 +193,47 @@ final class ArchiveStore {
 
     /// Messages of an archived space (newest first), or nil when not present.
     func messages(forSpaceId spaceId: String) -> [Message]? {
-        queue.sync {
-            loadSpaceLocked(spaceId)?.messages
-        }
+        loadSpace(spaceId)?.messages
     }
 
     /// Metadata of every archived space (sorted by most recent activity).
     func summaries() -> [SpaceArchiveSummary] {
-        queue.sync {
-            // Fall back to scanning files when the index is missing.
-            if summaryByID.isEmpty {
-                let files = (try? FileManager.default.contentsOfDirectory(at: spacesDir, includingPropertiesForKeys: nil)) ?? []
-                for file in files where file.pathExtension == "json" {
-                    if let data = try? Data(contentsOf: file),
-                       let archive = try? decoder.decode(SpaceArchive.self, from: data) {
-                        summaryByID[archive.spaceId] = SpaceArchiveSummary(
-                            spaceId: archive.spaceId,
-                            spaceName: archive.spaceName,
-                            messageCount: archive.messages.count,
-                            updatedAt: archive.updatedAt
-                        )
-                    }
+        // Fall back to scanning files when the index is missing.
+        if summaryByID.isEmpty {
+            let files = (try? FileManager.default.contentsOfDirectory(at: spacesDir, includingPropertiesForKeys: nil)) ?? []
+            for file in files where file.pathExtension == "json" {
+                if let data = try? Data(contentsOf: file),
+                   let archive = try? decoder.decode(SpaceArchive.self, from: data) {
+                    summaryByID[archive.spaceId] = SpaceArchiveSummary(
+                        spaceId: archive.spaceId,
+                        spaceName: archive.spaceName,
+                        messageCount: archive.messages.count,
+                        updatedAt: archive.updatedAt
+                    )
                 }
             }
-            return summaryByID.values.sorted { ($0.updatedAt, $0.spaceName) > ($1.updatedAt, $1.spaceName) }
         }
+        return summaryByID.values.sorted { ($0.updatedAt, $0.spaceName) > ($1.updatedAt, $1.spaceName) }
     }
 
-    // MARK: - Load / lock helpers
+    // MARK: - Load / persistence helpers
 
     private func loadIndexAndManifest() {
-        queue.async { [self] in
-            let manifestURL = rootDir.appendingPathComponent("manifest.json")
-            if let data = try? Data(contentsOf: manifestURL),
-               let entries = try? decoder.decode([String: MediaEntry].self, from: data) {
-                mediaEntries = entries
-            }
-            let indexURL = rootDir.appendingPathComponent("index.json")
-            if let data = try? Data(contentsOf: indexURL),
-               let list = try? decoder.decode([SpaceArchiveSummary].self, from: data) {
-                for summary in list {
-                    summaryByID[summary.spaceId] = summary
-                }
+        let manifestURL = rootDir.appendingPathComponent("manifest.json")
+        if let data = try? Data(contentsOf: manifestURL),
+           let entries = try? decoder.decode([String: MediaEntry].self, from: data) {
+            mediaEntries = entries
+        }
+        let indexURL = rootDir.appendingPathComponent("index.json")
+        if let data = try? Data(contentsOf: indexURL),
+           let list = try? decoder.decode([SpaceArchiveSummary].self, from: data) {
+            for summary in list {
+                summaryByID[summary.spaceId] = summary
             }
         }
     }
 
-    private func loadSpaceLocked(_ spaceId: String) -> SpaceArchive? {
+    private func loadSpace(_ spaceId: String) -> SpaceArchive? {
         if let cached = spaces[spaceId] {
             return cached
         }
@@ -241,21 +247,40 @@ final class ArchiveStore {
     }
 
     private func scheduleFlush() {
-        pendingFlush?.cancel()
-        let workItem = DispatchWorkItem { [self] in
-            flushLocked()
+        guard flushTask == nil else { return }
+        flushTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return
+            }
+            await self?.persistAfterDebounce()
         }
-        pendingFlush = workItem
-        queue.asyncAfter(deadline: .now() + 2.0, execute: workItem)
     }
 
-    private func flushLocked() {
-        for archive in spaces.values {
-            guard let data = try? encoder.encode(archive) else { continue }
-            let url = spacesDir.appendingPathComponent(Self.fileName(for: archive.spaceId))
-            try? data.write(to: url, options: [.atomic])
+    /// Runs on the actor after the debounce window; clears the in-flight task,
+    /// writes dirty spaces and re-arms when new writes arrived meanwhile.
+    private func persistAfterDebounce() {
+        flushTask = nil
+        persistLocked(dirtyOnly: true)
+        if !dirtySpaceIDs.isEmpty {
+            scheduleFlush()
         }
-        if !summaryByID.isEmpty, let data = try? encoder.encode(Array(summaryByID.values)) {
+    }
+
+    /// Writes dirty (or, when `dirtyOnly` is false, every) archived space to
+    /// disk along with the index and media manifest.
+    private func persistLocked(dirtyOnly: Bool) {
+        var wroteSpaces = false
+        for (spaceID, archive) in spaces {
+            guard !dirtyOnly || dirtySpaceIDs.contains(spaceID) else { continue }
+            guard let data = try? encoder.encode(archive) else { continue }
+            let url = spacesDir.appendingPathComponent(Self.fileName(for: spaceID))
+            try? data.write(to: url, options: [.atomic])
+            wroteSpaces = true
+        }
+        dirtySpaceIDs.removeAll()
+        if wroteSpaces, let data = try? encoder.encode(Array(summaryByID.values)) {
             try? data.write(to: rootDir.appendingPathComponent("index.json"), options: [.atomic])
         }
         if !mediaEntries.isEmpty, let data = try? encoder.encode(mediaEntries) {
@@ -263,11 +288,11 @@ final class ArchiveStore {
         }
     }
 
-    private static func fileName(for spaceId: String) -> String {
+    nonisolated private static func fileName(for spaceId: String) -> String {
         "\(sha(spaceId)).json"
     }
 
-    private static func sha(_ value: String) -> String {
+    nonisolated private static func sha(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8))
             .map { String(format: "%02x", $0) }
             .joined()

@@ -198,7 +198,7 @@ struct ContentView: View {
             }
         } detail: {
             if let space = chatVM.selectedSpace {
-                ChatDetailView(space: space, chatVM: chatVM)
+                ChatDetailView(space: space, chatVM: chatVM, scheduledStore: ScheduledMessageStore.shared)
                     .id(space.id)
             } else {
                 ContentUnavailableView(
@@ -234,6 +234,7 @@ struct ContentView: View {
 struct ChatDetailView: View {
     let space: ChatSpace
     @ObservedObject var chatVM: ChatViewModel
+    @ObservedObject var scheduledStore: ScheduledMessageStore
     @State private var newMessageText = ""
     @State private var selectedFiles: [URL] = []
     @State private var scrollProxy: ScrollViewProxy?
@@ -248,6 +249,9 @@ struct ChatDetailView: View {
     @State private var editingText = ""
     @State private var quotedDraft: Message?
     @State private var isAddCustomEmojiOpen = false
+    @State private var scheduleSendLater = false
+    @State private var scheduleDate = Date().addingTimeInterval(300)
+    @State private var overdueBlinking = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -367,6 +371,9 @@ struct ChatDetailView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     topHistoryBar
+                    if let scheduled = scheduledStore.message(forSpaceId: space.id) {
+                        scheduledPreviewRow(scheduled)
+                    }
                     ForEach(chatVM.messages.reversed()) { message in
                         messageRow(message, proxy: proxy)
                     }
@@ -426,8 +433,99 @@ struct ChatDetailView: View {
         }
     }
 
-    /// Floating button that scrolls to the first unread message, or to the
-    /// newest message when everything has been read.
+    /// Preview of a scheduled (pending) or overdue message shown at the top of
+    /// the feed — visually distinct from real attachments (clock icon + send
+    /// time). Overdue entries blink and auto-remove after ~10 seconds.
+    @ViewBuilder private func scheduledPreviewRow(_ scheduled: ScheduledMessage) -> some View {
+        if scheduled.status == .overdue {
+            overdueScheduledRow(scheduled)
+                .task(id: scheduled.id) {
+                    chatVM.handleScheduledForOpenedSpace(space.id)
+                }
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 0.35).repeatForever(autoreverses: true)) {
+                        overdueBlinking = true
+                    }
+                }
+                .opacity(overdueBlinking ? 1.0 : 0.25)
+        } else {
+            pendingScheduledRow(scheduled)
+        }
+    }
+
+    private func pendingScheduledRow(_ scheduled: ScheduledMessage) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "clock")
+                .font(.title3)
+                .foregroundColor(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L.str("schedule.planned", scheduledTimeString(scheduled.scheduledAt)))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+                if !scheduled.text.isEmpty {
+                    Text(scheduled.text)
+                        .font(.caption)
+                        .lineLimit(2)
+                        .foregroundColor(.secondary)
+                }
+                if !scheduled.attachmentFileURLs.isEmpty {
+                    Label(L.str("schedule.attachments", String(scheduled.attachmentFileURLs.count)), systemImage: "paperclip")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+            Button {
+                chatVM.cancelScheduledMessage(in: space.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(L.str("schedule.cancel"))
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.35)))
+        .cornerRadius(8)
+        .padding(.vertical, 4)
+    }
+
+    private func overdueScheduledRow(_ scheduled: ScheduledMessage) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.clock")
+                .font(.title3)
+                .foregroundColor(.red)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L.str("schedule.overdue"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.red)
+                if !scheduled.text.isEmpty {
+                    Text(scheduled.text)
+                        .font(.caption)
+                        .lineLimit(2)
+                        .foregroundColor(.secondary)
+                }
+                Text(L.str("schedule.overdue.hint"))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(8)
+        .background(Color.red.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.45)))
+        .cornerRadius(8)
+        .padding(.vertical, 4)
+    }
+
+    /// Localized short "d MMM yyyy, HH:mm" rendering for the scheduled send time.
+    private func scheduledTimeString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: L.isRussian ? "ru_RU" : "en_US")
+        formatter.dateFormat = L.isRussian ? "d MMM yyyy, HH:mm" : "MMM d, yyyy, HH:mm"
+        return formatter.string(from: date)
+    }
     private var jumpToUnreadButton: some View {
         let unread = chatVM.unreadCount(for: space.id)
         return Button {
@@ -645,7 +743,34 @@ struct ChatDetailView: View {
                         Task { await chatVM.loadMembers(for: space.id) }
                     }
                     
-                    Button(L.str("send")) {
+                    if scheduleSendLater {
+                        DatePicker(
+                            "",
+                            selection: $scheduleDate,
+                            in: Date().addingTimeInterval(60) ... Date().addingTimeInterval(60 * 60 * 24 * 365),
+                            displayedComponents: [.date, .hourAndMinute]
+                        )
+                        .datePickerStyle(.compact)
+                        .labelsHidden()
+                        .fixedSize()
+                        .help(L.str("schedule.date"))
+                    }
+                    
+                    Toggle(isOn: $scheduleSendLater) {
+                        Text(L.str("schedule.later"))
+                            .font(.caption)
+                            .foregroundColor(scheduledStore.hasScheduled(in: space.id) ? Color.secondary : Color.primary)
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(scheduledStore.hasScheduled(in: space.id))
+                    .help(scheduledStore.hasScheduled(in: space.id) ? L.str("schedule.blocked") : L.str("schedule.later.help"))
+                    .onChange(of: scheduleSendLater) { on in
+                        if on {
+                            scheduleDate = Date().addingTimeInterval(300)
+                        }
+                    }
+                    
+                    Button(L.str(scheduleSendLater ? "schedule.confirm" : "send")) {
                         sendInputMessage()
                     }
                     .disabled(newMessageText.isEmpty && selectedFiles.isEmpty && quotedDraft == nil)
@@ -676,6 +801,23 @@ struct ChatDetailView: View {
         guard !chatVM.isSending else { return }
         let quoteId = quotedDraft?.id
         let quoteLastUpdateTime = quotedDraft?.lastUpdateTime
+        if scheduleSendLater {
+            let scheduled = chatVM.scheduleMessage(
+                spaceId: space.id,
+                text: text,
+                attachments: selectedFiles,
+                quotedMessageId: quoteId,
+                quotedLastUpdateTime: quoteLastUpdateTime,
+                at: scheduleDate
+            )
+            if scheduled {
+                scheduleSendLater = false
+                newMessageText = ""
+                selectedFiles = []
+                quotedDraft = nil
+            }
+            return
+        }
         chatVM.isSending = true
         Task {
             defer { chatVM.isSending = false }
