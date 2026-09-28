@@ -222,40 +222,90 @@ class GoogleAuthManager: ObservableObject {
     /// Exchanges the access token via URLSession like every other network call;
     /// the existing code→token exchange in `signIn` is left untouched.
     func ensureAuthorized() async -> AuthCheckResult {
-        guard let refreshToken = KeychainTokenStore.refreshToken,
-              !refreshToken.isEmpty else {
-            print("ℹ️ No cached refresh token — interactive sign-in required")
-            return .needsSignIn
-        }
+        if let refreshToken = KeychainTokenStore.refreshToken, !refreshToken.isEmpty {
+            do {
+                let newAccessToken = try await exchangeRefreshToken(refreshToken)
+                await applyRestoredSession(accessToken: newAccessToken)
+                print("✅ Session restored from cached refresh token")
+                return .authorized
+            } catch let error as TokenExchangeError {
+                if case .invalidGrant = error {
+                    KeychainTokenStore.deleteRefreshToken()
+                    print("⚠️ Cached refresh token rejected")
+                    return await restoreGoogleSignInSession() ? .authorized : .needsSignIn
+                }
 
-        do {
-            let newAccessToken = try await exchangeRefreshToken(refreshToken)
-            let email = UserDefaults.standard.string(forKey: Self.cachedEmailKey) ?? ""
-            let name = UserDefaults.standard.string(forKey: Self.cachedNameKey) ?? ""
-            await MainActor.run {
-                self.accessToken = newAccessToken
-                self.userEmail = email
-                self.userName = name
-                self.isSignedIn = true
-            }
-            print("✅ Session restored from cached refresh token")
-            return .authorized
-        } catch let error as TokenExchangeError {
-            switch error {
-            case .invalidGrant:
-                KeychainTokenStore.deleteRefreshToken()
-                print("⚠️ Cached refresh token rejected — interactive sign-in required")
-                return .needsSignIn
-            case .invalidClient:
-                print("⚠️ Token client mismatch — interactive sign-in required")
-                return .needsSignIn
-            default:
+                // Non-invalid_grant errors must keep the token and must not
+                // trigger an interactive OAuth window.
+                if await restoreGoogleSignInSession() {
+                    return .authorized
+                }
                 print("⚠️ Token refresh failed (retry available): \(error.errorDescription ?? "?")")
                 return .failed(message: error.errorDescription ?? L.str("auth.check.failed"))
+            } catch {
+                if await restoreGoogleSignInSession() {
+                    return .authorized
+                }
+                print("⚠️ Token refresh network error: \(error.localizedDescription)")
+                return .failed(message: error.localizedDescription)
             }
-        } catch {
-            print("⚠️ Token refresh network error: \(error.localizedDescription)")
-            return .failed(message: error.localizedDescription)
+        }
+
+        // Migrate an existing GoogleSignIn Keychain session without any browser
+        // interaction, then seed the app-owned refresh-token item.
+        if await restoreGoogleSignInSession() {
+            return .authorized
+        }
+
+        print("ℹ️ No cached refresh token — interactive sign-in required")
+        return .needsSignIn
+    }
+
+    /// Restores GoogleSignIn's existing Keychain state without presenting an
+    /// authentication window. It covers installations created before the app
+    /// began persisting its own refresh token.
+    private func restoreGoogleSignInSession() async -> Bool {
+        guard GIDSignIn.sharedInstance.hasPreviousSignIn() else { return false }
+
+        return await withCheckedContinuation { continuation in
+            GIDSignIn.sharedInstance.restorePreviousSignIn { user, error in
+                guard let user, error == nil else {
+                    if let error {
+                        print("⚠️ Silent GoogleSignIn restore failed: \(error.localizedDescription)")
+                    }
+                    continuation.resume(returning: false)
+                    return
+                }
+
+                let refreshToken = user.refreshToken.tokenString
+                if !refreshToken.isEmpty {
+                    _ = KeychainTokenStore.saveRefreshToken(refreshToken)
+                }
+                let email = user.profile?.email ?? ""
+                let name = user.profile?.name ?? ""
+                UserDefaults.standard.set(email, forKey: Self.cachedEmailKey)
+                UserDefaults.standard.set(name, forKey: Self.cachedNameKey)
+
+                self.runOnMain {
+                    self.accessToken = user.accessToken.tokenString
+                    self.userEmail = email
+                    self.userName = name
+                    self.isSignedIn = true
+                    print("✅ Session restored from GoogleSignIn Keychain")
+                    continuation.resume(returning: true)
+                }
+            }
+        }
+    }
+
+    private func applyRestoredSession(accessToken: String) async {
+        let email = UserDefaults.standard.string(forKey: Self.cachedEmailKey) ?? ""
+        let name = UserDefaults.standard.string(forKey: Self.cachedNameKey) ?? ""
+        await MainActor.run {
+            self.accessToken = accessToken
+            self.userEmail = email
+            self.userName = name
+            self.isSignedIn = true
         }
     }
 

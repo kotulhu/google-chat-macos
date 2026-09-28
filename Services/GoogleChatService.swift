@@ -1,5 +1,13 @@
 import Foundation
 
+/// One page of fetched messages: the display-ready feed plus the raw records
+/// that call sites persist into the local SQLite history.
+struct MessagePage {
+    let messages: [Message]
+    let nextPageToken: String?
+    let history: [MessageHistoryRecord]
+}
+
 /// Wraps the Google Chat REST API and the related People API calls.
 ///
 /// All network work pulls the current bearer token from `authManager`
@@ -169,7 +177,11 @@ class GoogleChatService {
     /// Fetches a page of messages (newest first).  Passing the `pageToken` returned
     /// by the previous call continues to older messages, so a feed can be
     /// progressively loaded backwards.
-    func fetchMessages(spaceId: String, pageSize: Int = 100, pageToken: String? = nil) async throws -> (messages: [Message], nextPageToken: String?) {
+    ///
+    /// Alongside the display-ready `Message` list, every page also carries the
+    /// per-message record for the local SQLite history (raw JSON + deletion
+    /// flag), so each call site can persist what it already received.
+    func fetchMessages(spaceId: String, pageSize: Int = 100, pageToken: String? = nil) async throws -> MessagePage {
         var components = URLComponents(string: "\(baseURL)\(spaceId)/messages")
         var queryItems = [
             URLQueryItem(name: "pageSize", value: "\(pageSize)"),
@@ -201,6 +213,11 @@ class GoogleChatService {
             let lastUpdateTime: String?
             let attachment: [AttachmentItem]?
             let quotedMessageMetadata: QuotedMessageMetadataItem?
+            let deletionMetadata: DeletionMetadataItem?
+        }
+
+        struct DeletionMetadataItem: Decodable {
+            let deletionType: String?
         }
 
         struct QuotedMessageMetadataItem: Decodable {
@@ -229,7 +246,22 @@ class GoogleChatService {
         PerfBeacon.start("Net", phase: "fetchMessages:decode")
         let decodedResponse = try JSONDecoder().decode(MessagesResponse.self, from: data)
         
-        let messages = decodedResponse.messages?.compactMap { msg -> Message? in
+        // Second pass keeps the original per-message JSON objects intact. Only
+        // the messages the app renders are typed-decoded; the raw objects are
+        // preserved verbatim for the local history store.
+        let rawItems: [[String: Any]] = {
+            guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let items = object["messages"] as? [[String: Any]] else {
+                return []
+            }
+            return items
+        }()
+
+        let typedMessages = decodedResponse.messages ?? []
+        var history: [MessageHistoryRecord] = []
+        history.reserveCapacity(typedMessages.count)
+
+        let messages = typedMessages.compactMap { msg -> Message? in
             let text = msg.text ?? ""
             let senderId = msg.sender?.name
             let isFromMe = isCurrentUser(senderId) || isCurrentClientDisplayName(msg.sender?.displayName)
@@ -282,10 +314,34 @@ class GoogleChatService {
                 quotedMessage: quotedMessage,
                 lastUpdateTime: msg.lastUpdateTime ?? msg.createTime
             )
-        } ?? []
-        
+        }
+
+        // History rows are built from the raw objects aligned with the typed
+        // items (same source order). They intentionally include messages the
+        // feed drops (e.g. empty deleted ones), so deletions get recorded too.
+        for (index, typed) in typedMessages.enumerated() where index < rawItems.count {
+            guard let rawData = try? JSONSerialization.data(withJSONObject: rawItems[index]) else {
+                continue
+            }
+            history.append(
+                MessageHistoryRecord(
+                    id: typed.name,
+                    spaceId: spaceId,
+                    senderId: typed.sender?.name,
+                    text: typed.text ?? "",
+                    createdTime: typed.createTime,
+                    isDeleted: typed.deletionMetadata != nil,
+                    rawJson: String(decoding: rawData, as: UTF8.self)
+                )
+            )
+        }
+
         PerfBeacon.end("Net", phase: "fetchMessages:decode", detail: "count=\(messages.count)")
-        return (messages: messages, nextPageToken: decodedResponse.nextPageToken)
+        return MessagePage(
+            messages: messages,
+            nextPageToken: decodedResponse.nextPageToken,
+            history: history
+        )
     }
 
     private var displayNameForCurrentUser: String {

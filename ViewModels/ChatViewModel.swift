@@ -315,8 +315,9 @@ class ChatViewModel: NSObject,ObservableObject {
             for space in spaces {
                 group.addTask {
                     do {
-                        let messages = try await service.fetchMessages(spaceId: space.id, pageSize: 20).messages
-                        return (space.id, messages)
+                        let page = try await service.fetchMessages(spaceId: space.id, pageSize: 20)
+                        MessageHistoryStore.shared.upsertMessages(page.history)
+                        return (space.id, page.messages)
                     } catch {
                         return (space.id, [])
                     }
@@ -391,6 +392,7 @@ class ChatViewModel: NSObject,ObservableObject {
             messagesPageToken = page.nextPageToken
             hasMoreMessages = page.nextPageToken != nil
             isLoadingPreviousMessages = false
+            MessageHistoryStore.shared.upsertMessages(page.history)
             PerfBeacon.end("Lenta", phase: "fetch", detail: "count=\(fetchedMessages.count)")
             accessToken = service.currentAccessToken
             
@@ -484,6 +486,7 @@ class ChatViewModel: NSObject,ObservableObject {
 
         do {
             let page = try await service.fetchMessages(spaceId: space.id, pageToken: pageToken)
+            MessageHistoryStore.shared.upsertMessages(page.history)
             let existingIds = Set(messages.map(\.id))
             var older = page.messages.filter { !existingIds.contains($0.id) }
             guard !older.isEmpty else {
@@ -1409,7 +1412,9 @@ class ChatViewModel: NSObject,ObservableObject {
             if selectedSpace?.id == space.id { continue }
             
             do {
-                let latestMessages = try await service.fetchMessages(spaceId: space.id, pageSize: 1).messages
+                let page = try await service.fetchMessages(spaceId: space.id, pageSize: 1)
+                MessageHistoryStore.shared.upsertMessages(page.history)
+                let latestMessages = page.messages
                 guard let lastMessage = latestMessages.first else { continue }
                 
                 if let idx = spaces.firstIndex(where: { $0.id == space.id }) {

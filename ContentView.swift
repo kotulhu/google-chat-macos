@@ -336,6 +336,7 @@ struct ChatDetailView: View {
             requestPendingBanner
             exportErrorBanner
             messageList
+            scheduledBottomBar
             mentionBar
             attachmentStrip
             quoteStrip
@@ -348,6 +349,19 @@ struct ChatDetailView: View {
         }
         .sheet(isPresented: $isAddCustomEmojiOpen) {
             AddCustomEmojiView(chatVM: chatVM)
+        }
+    }
+
+    /// Fixed draft-style banner for a scheduled message. It is deliberately a
+    /// sibling of the scroll view, so it never appears as a chat message or
+    /// moves while the user reads the history.
+    @ViewBuilder private var scheduledBottomBar: some View {
+        if let scheduled = scheduledStore.message(forSpaceId: space.id) {
+            scheduledPreviewRow(scheduled)
+                .padding(.horizontal)
+                .padding(.vertical, 4)
+                .background(.bar)
+                .overlay(Divider(), alignment: .top)
         }
     }
 
@@ -448,9 +462,6 @@ struct ChatDetailView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     topHistoryBar
-                    if let scheduled = scheduledStore.message(forSpaceId: space.id) {
-                        scheduledPreviewRow(scheduled)
-                    }
                     ForEach(chatVM.messages.reversed()) { message in
                         messageRow(message, proxy: proxy)
                     }
