@@ -14,6 +14,9 @@ public enum EnglishStrings {
         // Login screen
         "login.prompt": "Sign in to start chatting",
         "login.button": "Sign in with Google",
+        "auth.checking": "Checking authorization…",
+        "auth.check.failed": "Could not restore session",
+        "auth.retry": "Retry",
 
         // Sidebar / list
         "filter.placeholder": "Filter by name",

@@ -15,6 +15,9 @@ public enum RussianStrings {
         // Login screen
         "login.prompt": "Войдите, чтобы начать общение",
         "login.button": "Войти через Google",
+        "auth.checking": "Проверка авторизации…",
+        "auth.check.failed": "Не удалось восстановить сеанс",
+        "auth.retry": "Повторить",
 
         // Sidebar / list
         "filter.placeholder": "Фильтр по названию",

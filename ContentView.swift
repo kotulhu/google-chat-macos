@@ -12,25 +12,102 @@ struct ContentView: View {
     @State private var isCreateChatOpen = false
     @State private var spaceFilterText = ""
 
+    /// Launch-time auth orchestration: while `.checking` the window shows a
+    /// loading view instead of an empty (unauthorized) chat screen.
+    private enum LaunchState: Equatable {
+        case checking
+        case ready
+        case failed(String)
+    }
+    @State private var launchState: LaunchState = .checking
+
     var body: some View {
-        if !authManager.isSignedIn {
-            loginView
-        } else {
-            mainChatView
-                .onAppear {
-                    if chatVM.spaces.isEmpty && !authManager.accessToken.isEmpty {
-                        chatVM.configure(with: authManager.accessToken, authManager: authManager)
-                        Task {
-                            await authManager.ensureDirectoryScopeIfNeeded()
-                            await chatVM.loadSpaces()
+        Group {
+            switch launchState {
+            case .checking:
+                launchingView
+            case .ready:
+                if !authManager.isSignedIn {
+                    loginView
+                } else {
+                    mainChatView
+                        .onAppear {
+                            if chatVM.spaces.isEmpty && !authManager.accessToken.isEmpty {
+                                chatVM.configure(with: authManager.accessToken, authManager: authManager)
+                                Task {
+                                    await authManager.ensureDirectoryScopeIfNeeded()
+                                    await chatVM.loadSpaces()
+                                }
+                            }
                         }
-                    }
+                        .onReceive(NotificationCenter.default.publisher(for: .openSpaceFromNotification)) { note in
+                            guard let spaceID = note.userInfo?["spaceId"] as? String else { return }
+                            chatVM.openSpace(withID: spaceID)
+                        }
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .openSpaceFromNotification)) { note in
-                    guard let spaceID = note.userInfo?["spaceId"] as? String else { return }
-                    chatVM.openSpace(withID: spaceID)
-                }
+            case .failed(let message):
+                authErrorView(message: message)
+            }
         }
+        .task {
+            guard launchState == .checking else { return }
+            await runAuthCheck()
+        }
+    }
+
+    /// Runs `ensureAuthorized()` on launch. A cached session jumps straight to
+    /// the chat screen; otherwise the normal login view appears.
+    private func runAuthCheck() async {
+        authManager.configure()
+        let result = await authManager.ensureAuthorized()
+        switch result {
+        case .authorized, .needsSignIn:
+            launchState = .ready
+        case .failed(let message):
+            launchState = .failed(message)
+        }
+    }
+
+    /// Loading state shown while the cached session is being validated.
+    var launchingView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "message.circle.fill")
+                .font(.system(size: 80))
+                .foregroundColor(.accentColor)
+
+            ProgressView()
+                .progressViewStyle(.circular)
+
+            Text(L.str("auth.checking"))
+                .foregroundColor(.secondary)
+        }
+        .frame(width: 400, height: 300)
+    }
+
+    /// Shown when the cached session could not be refreshed and the token was
+    /// deliberately kept (network / transient error): the user can retry or
+    /// sign in interactively without dropping authorization.
+    func authErrorView(message: String) -> some View {
+        VStack(spacing: 20) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 60))
+                .foregroundColor(.orange)
+
+            Text(L.str("auth.check.failed"))
+                .font(.title2)
+                .bold()
+
+            Text(message)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button(L.str("auth.retry")) {
+                launchState = .checking
+                Task { await runAuthCheck() }
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .frame(width: 400, height: 300)
     }
 
     /// The sign-in screen shown before a Google account is connected.
