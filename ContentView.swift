@@ -639,7 +639,7 @@ struct ChatDetailView: View {
         .help(L.str("jump.unread.hint"))
     }
 
-    /// Scrolls the message list to the first unread message, falling back to
+    /// Scrolls the message list to the latest unread message, falling back to
     /// the newest one when there is nothing unread.
     private func jumpToFirstUnread() {
         guard let target = chatVM.initialScrollTarget(for: space.id) else { return }

@@ -1307,15 +1307,17 @@ class ChatViewModel: NSObject,ObservableObject {
         return messages.last?.id
     }
     
-    /// Chooses where the message list should initially scroll: the first unread
-    /// message, or the newest one if everything has been read.
+    /// Chooses where the message list should initially scroll: the latest
+    /// unread message, or the newest one if everything has been read. The
+    /// in-memory list is newest-first, so do not reverse it here — doing so
+    /// sends a newly opened chat to the oldest loaded message.
     func initialScrollTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
         if let lastRead = loadLastReadTimestamp(for: spaceId) {
-            if let firstUnread = messages.reversed().first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
-                return (firstUnread.id, .top)
+            if let latestUnread = messages.first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
+                return (latestUnread.id, .bottom)
             }
-        } else if let firstUnread = messages.reversed().first(where: { !$0.isFromMe }) {
-            return (firstUnread.id, .top)
+        } else if let latestUnread = messages.first(where: { !$0.isFromMe }) {
+            return (latestUnread.id, .bottom)
         }
         return messages.first.map { ($0.id, .bottom) }
     }
