@@ -38,7 +38,10 @@ final class MessageHistoryStore {
 
     private var databaseURL: URL {
         let appSupport = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
         return appSupport
             .appendingPathComponent("Gogol Chat", isDirectory: true)
             .appendingPathComponent("History", isDirectory: true)

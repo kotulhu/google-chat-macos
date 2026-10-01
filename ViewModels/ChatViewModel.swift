@@ -1241,9 +1241,10 @@ class ChatViewModel: NSObject,ObservableObject {
                 messages[index].reactions = reactions
                 objectWillChange.send()
             }
-            if let space = selectedSpace {
+            if let space = selectedSpace, index < messages.count {
+                let message = messages[index]
                 Task {
-                    await ArchiveStore.shared.mergeMessage(spaceId: space.id, message: messages[index])
+                    await ArchiveStore.shared.mergeMessage(spaceId: space.id, message: message)
                 }
             }
         }
