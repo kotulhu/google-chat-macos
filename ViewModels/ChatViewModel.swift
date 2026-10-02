@@ -1298,27 +1298,37 @@ class ChatViewModel: NSObject,ObservableObject {
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
     
-    /// Returns the ID of the message at or before the space's last-read mark.
-    func lastReadMessageId(in messages: [Message]) -> String? {
-        guard let space = selectedSpace else { return nil }
-        let lastRead = space.lastReadTimestamp ?? Date()
-        if let candidate = messages.last(where: { $0.timestamp <= lastRead }) {
-            return candidate.id
+    /// Returns the ID of the last message the user has already read: the
+    /// **newest** message at or before the space's persisted read mark, or the
+    /// newest message when nothing has been marked read yet.
+    ///
+    /// The in-memory list is newest-first, so the newest message at or before
+    /// the mark is found with `first(where:)` — using `last(where:)` here would
+    /// return the *oldest* loaded message and send the feed to the very top.
+    func lastReadMessageId(in messages: [Message], spaceId: String) -> String? {
+        guard !messages.isEmpty else { return nil }
+        if let lastRead = loadLastReadTimestamp(for: spaceId),
+           let lastReadMessage = messages.first(where: { $0.timestamp <= lastRead }) {
+            return lastReadMessage.id
         }
-        return messages.last?.id
+        return messages.first?.id
     }
     
-    /// Chooses where the message list should initially scroll: the latest
-    /// unread message, or the newest one if everything has been read. The
-    /// in-memory list is newest-first, so do not reverse it here — doing so
-    /// sends a newly opened chat to the oldest loaded message.
+    /// Chooses where the message list should initially scroll: always the
+    /// last-read message, so reopening a chat resumes where the user left off
+    /// (with any unread messages just below the anchor). Falls back to the
+    /// newest message when the whole chat has been read.
     func initialScrollTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
-        if let lastRead = loadLastReadTimestamp(for: spaceId) {
-            if let latestUnread = messages.first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
-                return (latestUnread.id, .bottom)
-            }
-        } else if let latestUnread = messages.first(where: { !$0.isFromMe }) {
-            return (latestUnread.id, .bottom)
+        guard let id = lastReadMessageId(in: messages, spaceId: spaceId) else { return nil }
+        return (id, .bottom)
+    }
+
+    /// Target for the floating "jump to unread" button: the newest unread
+    /// message, or the newest message when everything has been read.
+    func jumpTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
+        if let lastRead = loadLastReadTimestamp(for: spaceId),
+           let newestUnread = messages.first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
+            return (newestUnread.id, .bottom)
         }
         return messages.first.map { ($0.id, .bottom) }
     }

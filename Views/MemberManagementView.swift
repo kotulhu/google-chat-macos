@@ -44,7 +44,7 @@ struct MemberManagementView: View {
                         .foregroundColor(.secondary)
                     ForEach(searchResults) { user in
                         HStack {
-                            AvatarImage(url: user.avatarURL, name: user.displayTitle)
+                            AvatarImage(url: user.avatarURL, name: user.displayTitle, accessToken: chatVM.accessToken)
                                 .frame(width: 24, height: 24)
                             Text(user.displayTitle)
                                 .lineLimit(1)
@@ -73,7 +73,7 @@ struct MemberManagementView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(chatVM.currentSpaceMembers) { member in
                         HStack {
-                            AvatarImage(url: member.avatarURL, name: member.displayTitle)
+                            AvatarImage(url: member.avatarURL, name: member.displayTitle, accessToken: chatVM.accessToken)
                                 .frame(width: 24, height: 24)
                             Text(member.displayTitle)
                                 .lineLimit(1)

@@ -23,6 +23,9 @@ struct MessageBubbleView: View {
     
     @ObservedObject private var reactionHistory = ReactionHistoryStore.shared
     @ObservedObject var nameResolver: NameResolver
+    /// Fallback avatar URLs from the space's membership list, used when the
+    /// People API has no photo for a sender.
+    var memberAvatarURLs: [String: URL] = [:]
     @State private var showReactionPicker = false
     
     var body: some View {
@@ -33,9 +36,11 @@ struct MessageBubbleView: View {
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 4) {
                 if !message.isFromMe {
                     if let senderId = message.senderId {
+                        let avatarURL = nameResolver.avatarURL(for: senderId) ?? memberAvatarURLs[senderId]
                         HStack(spacing: 6) {
-                            AvatarImage(url: nameResolver.avatarURL(for: senderId),
-                                        name: nameResolver.displayName(for: senderId))
+                            AvatarImage(url: avatarURL,
+                                        name: nameResolver.displayName(for: senderId),
+                                        accessToken: accessToken)
                                 .frame(width: 20, height: 20)
                             Button(nameResolver.displayName(for: senderId)) {
                                 onSenderTap?(senderId)

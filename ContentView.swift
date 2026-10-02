@@ -317,7 +317,7 @@ struct ChatDetailView: View {
     @State private var scrollProxy: ScrollViewProxy?
     @State private var didInitialScroll = false
     @State private var initialScrollTarget: (id: String, anchor: UnitPoint)?
-    @State private var isStabilizingInitialScroll = false
+    @State private var stabilizeToken = 0
     @State private var stabilizeInitialScrollUntil: Date?
     @State private var mentionQuery: String?
     @State private var inputHeight: CGFloat = 36
@@ -458,12 +458,13 @@ struct ChatDetailView: View {
     /// The scrolling message list with lazy-name rendering and the loading
     /// preloader overlay.
     private var messageList: some View {
-        ScrollViewReader { proxy in
+        let memberAvatars = memberAvatarURLs
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     topHistoryBar
                     ForEach(chatVM.messages.reversed()) { message in
-                        messageRow(message, proxy: proxy)
+                        messageRow(message, proxy: proxy, memberAvatars: memberAvatars)
                     }
                 }
                 .padding()
@@ -474,7 +475,15 @@ struct ChatDetailView: View {
             }
             .onChange(of: chatVM.messages) { _ in
                 PerfBeacon.mark("Render", phase: "messagesChanged", detail: "count=\(chatVM.messages.count)")
-                scrollToInitialMessage(using: proxy)
+                if didInitialScroll {
+                    // The feed can be replaced wholesale (network response after
+                    // the cache, or a poll tick). Re-assert the anchor while the
+                    // layout is still settling instead of letting the lazy stack
+                    // fall back to offset 0 (the oldest message).
+                    stabilizeInitialScroll(using: proxy)
+                } else {
+                    scrollToInitialMessage(using: proxy)
+                }
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -642,15 +651,28 @@ struct ChatDetailView: View {
     /// Scrolls the message list to the latest unread message, falling back to
     /// the newest one when there is nothing unread.
     private func jumpToFirstUnread() {
-        guard let target = chatVM.initialScrollTarget(for: space.id) else { return }
+        guard let target = chatVM.jumpTarget(for: space.id) else { return }
         withAnimation(.easeInOut(duration: 0.25)) {
             scrollProxy?.scrollTo(target.id, anchor: target.anchor)
         }
     }
 
+    /// Avatar URLs from the space's membership list, keyed by `users/...` id.
+    /// Used as a fallback in the feed when the People API has no photo for a
+    /// sender but the members endpoint does.
+    private var memberAvatarURLs: [String: URL] {
+        var map: [String: URL] = [:]
+        for member in chatVM.currentSpaceMembers {
+            if let url = member.avatarURL {
+                map[member.id] = url
+            }
+        }
+        return map
+    }
+
     /// One message row bound to the scroll context, so the huge init call does
     /// not burden the body's type checker.
-    private func messageRow(_ message: Message, proxy: ScrollViewProxy) -> some View {
+    private func messageRow(_ message: Message, proxy: ScrollViewProxy, memberAvatars: [String: URL]) -> some View {
         MessageBubbleView(
             message: message,
             accessToken: chatVM.accessToken,
@@ -691,7 +713,8 @@ struct ChatDetailView: View {
                     scrollProxy?.scrollTo(quotedId, anchor: .center)
                 }
             },
-            nameResolver: chatVM.nameResolver
+            nameResolver: chatVM.nameResolver,
+            memberAvatarURLs: memberAvatars
         )
         .id(message.id)
         .onAppear {
@@ -948,31 +971,31 @@ struct ChatDetailView: View {
         }
         
         initialScrollTarget = target
-        stabilizeInitialScrollUntil = Date().addingTimeInterval(2.5)
+        stabilizeInitialScrollUntil = Date().addingTimeInterval(5)
         didInitialScroll = true
         PerfBeacon.mark("Render", phase: "initialScroll", detail: "id=\(target.id.suffix(12))")
         stabilizeInitialScroll(using: proxy)
     }
 
     /// Re-applies the initial scroll anchor a few times while the layout is
-    /// still stabilizing (e.g. while attachments or reactions finish loading).
+    /// still stabilizing (e.g. while attachments finish loading or the network
+    /// response replaces the cached feed). Each call supersedes the previous
+    /// one via `stabilizeToken`, so stale anchors never fire.
     private func stabilizeInitialScroll(using proxy: ScrollViewProxy) {
         guard let target = initialScrollTarget,
               let stabilizeInitialScrollUntil,
-              Date() <= stabilizeInitialScrollUntil,
-              !isStabilizingInitialScroll else {
+              Date() <= stabilizeInitialScrollUntil else {
             return
         }
         
-        isStabilizingInitialScroll = true
-        let delays: [TimeInterval] = [0.02, 0.08, 0.18, 0.35]
+        stabilizeToken &+= 1
+        let token = stabilizeToken
+        let delays: [TimeInterval] = [0, 0.05, 0.12, 0.25, 0.5, 0.9, 1.5]
         for delay in delays {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard token == stabilizeToken else { return }
                 proxy.scrollTo(target.id, anchor: target.anchor)
             }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + (delays.last ?? 0.35) + 0.05) {
-            isStabilizingInitialScroll = false
         }
     }
     
