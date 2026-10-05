@@ -260,6 +260,15 @@ struct AttachmentRow: View {
     @State private var imageData: Data?
     @State private var isLoading = true
     @State private var fileSize: Int64 = 0
+    /// Aspect ratio the image slot is laid out with. Reserved from the known or
+    /// probed pixel size *before* the bytes arrive, so the row occupies the same
+    /// height in the loading and the loaded state and the feed never reflows.
+    @State private var reservedAspectRatio: CGFloat = ImageDimensions.fallbackAspectRatio
+
+    private static let maxImageHeight: CGFloat = 500
+    /// Height of the download button, reserved while the image is still loading
+    /// so the row does not grow when the real content replaces the spinner.
+    private static let downloadButtonHeight: CGFloat = 16
 
     /// In-memory cache of resolved attachment sizes keyed by download URL, so
     /// reloads of the same message do not re-probe the server.
@@ -270,25 +279,30 @@ struct AttachmentRow: View {
             if attachment.isImage {
                 if let imageData, let nsImage = NSImage(data: imageData) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Image(nsImage: nsImage)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: .infinity, maxHeight: 500)
-                            .cornerRadius(8)
+                        imageSlot(aspectRatio: imageAspectRatio(nsImage)) {
+                            Image(nsImage: nsImage)
+                                .resizable()
+                        }
                         Button(L.str("download")) {
                             downloadFile(from: attachment.url)
                         }
                         .font(.caption)
+                        .frame(height: Self.downloadButtonHeight)
                     }
                     .padding(8)
                     .background(Color.gray.opacity(0.1))
                     .cornerRadius(8)
                 } else if isLoading {
-                    HStack {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text(L.str("loading"))
-                            .font(.caption)
+                    VStack(alignment: .leading, spacing: 4) {
+                        imageSlot(aspectRatio: reservedAspectRatio) {
+                            HStack {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text(L.str("loading"))
+                                    .font(.caption)
+                            }
+                        }
+                        Color.clear.frame(height: Self.downloadButtonHeight)
                     }
                     .padding(8)
                     .background(Color.gray.opacity(0.1))
@@ -296,11 +310,26 @@ struct AttachmentRow: View {
                     .task {
                         await loadImage()
                     }
+                    .task {
+                        await resolveDimensions()
+                    }
                 } else {
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle")
-                        Text(L.str("load.failed"))
-                            .font(.caption)
+                    // Keeps the reserved slot height: a failed download must not
+                    // collapse the row, otherwise an offline burst of failures
+                    // would reflow the whole feed at once.
+                    VStack(alignment: .leading, spacing: 4) {
+                        imageSlot(aspectRatio: reservedAspectRatio) {
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle")
+                                Text(L.str("load.failed"))
+                                    .font(.caption)
+                            }
+                        }
+                        Button(L.str("download")) {
+                            downloadFile(from: attachment.url)
+                        }
+                        .font(.caption)
+                        .frame(height: Self.downloadButtonHeight)
                     }
                     .padding(8)
                     .background(Color.gray.opacity(0.1))
@@ -332,9 +361,67 @@ struct AttachmentRow: View {
                 .task { await determineSize() }
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: imageData)
     }
     
+    /// Lays the image out at a fixed height derived from its aspect ratio, so the
+    /// placeholder and the decoded picture occupy exactly the same space and the
+    /// row height does not change when the download finishes.
+    private func imageSlot<Content: View>(aspectRatio: CGFloat, @ViewBuilder content: () -> Content) -> some View {
+        content()
+            .aspectRatio(aspectRatio, contentMode: .fit)
+            .frame(maxWidth: .infinity, maxHeight: Self.maxImageHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Aspect ratio of a decoded image, or the reserved one when it is degenerate.
+    private func imageAspectRatio(_ image: NSImage) -> CGFloat {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return reservedAspectRatio }
+        return size.width / size.height
+    }
+
+    /// Asks the server for just the first bytes of the image so the slot can be
+    /// laid out at its final height before the full download completes. Falls
+    /// back to a remembered size from a previous run, and finally to 16:9.
+    private func resolveDimensions() async {
+        let key = imageCacheKey
+        if let cached = ImageDimensions.shared.cachedSize(forKey: key) {
+            await MainActor.run {
+                self.reservedAspectRatio = cached.width / cached.height
+            }
+            return
+        }
+
+        let measured = await ImageDimensions.shared.resolveSize(forKey: key) {
+            await self.probeImageDimensions()
+        }
+        guard !Task.isCancelled, let measured else { return }
+        await MainActor.run {
+            self.reservedAspectRatio = measured.width / measured.height
+        }
+    }
+
+    /// Fetches a small byte range and reads the pixel size out of the image
+    /// header. Returns nil when no candidate URL yields a parsable header.
+    private func probeImageDimensions() async -> CGSize? {
+        for candidate in imageCandidates() {
+            if Task.isCancelled { return nil }
+            var request = URLRequest(url: candidate.url)
+            request.setValue("bytes=0-65535", forHTTPHeaderField: "Range")
+            if candidate.authorization == .bearer {
+                request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            }
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let size = ImageDimensionProbe.size(fromPartial: data) else {
+                continue
+            }
+            return size
+        }
+        return nil
+    }
+
     /// Loads the attachment image: hits the memory/disk cache first, otherwise
     /// downloads and decodes the bytes, keeping the decode off the main actor.
     private func loadImage() async {
@@ -344,6 +431,7 @@ struct AttachmentRow: View {
                 _ = NSImage(data: cachedData)
             }
             if let nsImage = NSImage(data: cachedData) {
+                rememberDimensions(of: nsImage, forKey: cacheKey)
                 await MainActor.run {
                     self.imageData = cachedData
                     self.isLoading = false
@@ -368,6 +456,7 @@ struct AttachmentRow: View {
                 _ = NSImage(data: data)
             }
             if let nsImage = NSImage(data: data) {
+                rememberDimensions(of: nsImage, forKey: cacheKey)
                 await MainActor.run {
                     self.imageData = data
                     self.isLoading = false
@@ -394,13 +483,22 @@ struct AttachmentRow: View {
         attachmentCacheKey
     }
 
+    /// Remembers a decoded image's pixel size so the next render can reserve
+    /// the exact slot height without a network round trip.
+    private func rememberDimensions(of image: NSImage, forKey key: String) {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return }
+        ImageDimensions.shared.store(CGSize(width: size.width, height: size.height), forKey: key)
+    }
+
     private var attachmentCacheKey: String {
         attachment.resourceName ?? attachment.name
     }
 
     /// Builds the list of candidate URLs (resource name, upload token, thumbnail,
     /// download URL — each with and without bearer auth) used to fetch the image.
-    private func loadImageData() async throws -> Data {
+    /// Shared by the full download and by the cheap dimension probe.
+    private func imageCandidates() -> [ImageLoadCandidate] {
         var candidates: [ImageLoadCandidate] = []
         if let resourceName = attachment.resourceName,
            let mediaURL = mediaURL(forResourceName: resourceName) {
@@ -428,10 +526,14 @@ struct AttachmentRow: View {
             candidates.append(ImageLoadCandidate(url: downloadURL, authorization: .none))
             candidates.append(ImageLoadCandidate(url: downloadURL, authorization: .bearer))
         }
-        candidates = deduplicated(candidates)
-        
+        return deduplicated(candidates)
+    }
+
+    /// Downloads the image bytes, returning the first candidate that yields
+    /// something `NSImage` can decode.
+    private func loadImageData() async throws -> Data {
         var lastError: Error?
-        for candidate in candidates {
+        for candidate in imageCandidates() {
             do {
                 var request = URLRequest(url: candidate.url)
                 if candidate.authorization == .bearer {

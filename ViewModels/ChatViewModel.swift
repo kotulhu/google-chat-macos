@@ -50,6 +50,9 @@ class ChatViewModel: NSObject,ObservableObject {
     private var sentNotificationIds = Set<String>()
     
     private var backgroundCheckTimer: Timer?
+    /// In-flight background scan. Held so a new timer tick can cancel the
+    /// previous sweep instead of letting scans overlap on slow connections.
+    private var backgroundCheckTask: Task<Void, Never>?
     
     private var spacesRefreshTimer: Timer?
     
@@ -1422,10 +1425,20 @@ class ChatViewModel: NSObject,ObservableObject {
         
         var hasNewMessage = false
         for space in spaces {
+            // A newer sweep superseded this one (or the app signed out): stop
+            // immediately instead of walking the remaining spaces.
+            if Task.isCancelled {
+                print("🟢 [Check] CANCELLED after \(spaces.count) spaces scanned")
+                return
+            }
             if selectedSpace?.id == space.id { continue }
             
             do {
                 let page = try await service.fetchMessages(spaceId: space.id, pageSize: 1)
+                if Task.isCancelled {
+                    print("🟢 [Check] CANCELLED during fetch of \(space.name)")
+                    return
+                }
                 MessageHistoryStore.shared.upsertMessages(page.history)
                 let latestMessages = page.messages
                 guard let lastMessage = latestMessages.first else { continue }
@@ -1464,6 +1477,7 @@ class ChatViewModel: NSObject,ObservableObject {
                         sentNotificationIds.insert(messageId)
                         hasNewMessage = true
                         let notificationMessage = await messageWithResolvedAuthor(lastMessage)
+                        if Task.isCancelled { return }
                         sendNotification(for: notificationMessage, in: space)
                         // Bump the dock badge immediately so the red dot
                         // appears without waiting for the 30-second refresh.
@@ -1511,7 +1525,12 @@ class ChatViewModel: NSObject,ObservableObject {
         backgroundCheckTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             print("⏰ [Timer tick] spaces=\(self.spaces.count), service=\(self.chatService != nil ? "OK" : "nil")")
-            Task { await self.checkAllSpacesForNewMessages() }
+            // Cancel the previous sweep first: a slow round of per-space
+            // requests must never overlap with the next tick.
+            self.backgroundCheckTask?.cancel()
+            self.backgroundCheckTask = Task { [weak self] in
+                await self?.checkAllSpacesForNewMessages()
+            }
         }
         print("⏰ startBackgroundCheck: timer started (60s)")
     }
@@ -1520,6 +1539,8 @@ class ChatViewModel: NSObject,ObservableObject {
     func stopBackgroundCheck() {
         backgroundCheckTimer?.invalidate()
         backgroundCheckTimer = nil
+        backgroundCheckTask?.cancel()
+        backgroundCheckTask = nil
     }
 
     /// Starts the 15-minute refresh of the space list so chats the user is

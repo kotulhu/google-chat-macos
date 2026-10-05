@@ -319,6 +319,16 @@ struct ChatDetailView: View {
     @State private var initialScrollTarget: (id: String, anchor: UnitPoint)?
     @State private var stabilizeToken = 0
     @State private var stabilizeInitialScrollUntil: Date?
+    /// Id of the message currently pinned to the feed's anchor edge. Bound to
+    /// `scrollPosition` so SwiftUI re-places it whenever the content above it
+    /// changes height (images finishing their download, older pages arriving).
+    @State private var visibleMessageId: String?
+    /// Latched as soon as the reader leaves the initial anchor. Afterwards the
+    /// feed is never forced back, and the pinned id alone keeps the view steady.
+    @State private var userMovedFromInitialAnchor = false
+    /// While the initial placement burst is still running, any anchor movement
+    /// is assumed to be programmatic rather than a reader scroll.
+    @State private var ignoreScrollDetectionUntil: Date?
     @State private var mentionQuery: String?
     @State private var inputHeight: CGFloat = 36
     @State private var isShowingMembers = false
@@ -467,8 +477,10 @@ struct ChatDetailView: View {
                         messageRow(message, proxy: proxy, memberAvatars: memberAvatars)
                     }
                 }
+                .scrollTargetLayout()
                 .padding()
             }
+            .scrollPosition(id: $visibleMessageId, anchor: .bottom)
             .onAppear {
                 scrollProxy = proxy
                 scrollToInitialMessage(using: proxy)
@@ -484,6 +496,9 @@ struct ChatDetailView: View {
                 } else {
                     scrollToInitialMessage(using: proxy)
                 }
+            }
+            .onChange(of: visibleMessageId) { _, newValue in
+                noteReaderMovedAwayFromAnchor(newValue)
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -509,6 +524,8 @@ struct ChatDetailView: View {
 
     /// Bar at the very top of the feed: a button to load the previous page of
     /// older messages, replaced by a spinner while that request is in flight.
+    /// The bar keeps a fixed height in both states, so starting a page load
+    /// does not shift the whole feed by the height of the button.
     @ViewBuilder private var topHistoryBar: some View {
         if chatVM.hasMoreMessages || chatVM.isLoadingPreviousMessages {
             HStack {
@@ -526,9 +543,12 @@ struct ChatDetailView: View {
                 }
                 Spacer()
             }
-            .padding(.vertical, 6)
+            .frame(height: Self.historyBarHeight)
         }
     }
+
+    /// Height reserved for the "load previous messages" bar.
+    private static let historyBarHeight: CGFloat = 40
 
     /// Preview of a scheduled (pending) or overdue message shown at the top of
     /// the feed — visually distinct from real attachments (clock icon + send
@@ -681,7 +701,7 @@ struct ChatDetailView: View {
             },
             mentionDisplayNames: mentionDisplayNames,
             onAttachmentLayoutChanged: {
-                stabilizeInitialScroll(using: proxy)
+                reassertAnchorIfStillParked(using: proxy)
             },
             onViewportVisible: { messageId in
                 chatVM.markReactionViewportVisible(id: messageId)
@@ -972,19 +992,27 @@ struct ChatDetailView: View {
         
         initialScrollTarget = target
         stabilizeInitialScrollUntil = Date().addingTimeInterval(5)
+        // The re-assert burst below fires up to 1.5s from now; anchor movement
+        // inside that window is ours, not the reader's.
+        ignoreScrollDetectionUntil = Date().addingTimeInterval(1.8)
+        // Seed the pin with the same anchor the scroll uses, so `scrollPosition`
+        // already holds this message while the first images decode.
+        visibleMessageId = target.id
         didInitialScroll = true
         PerfBeacon.mark("Render", phase: "initialScroll", detail: "id=\(target.id.suffix(12))")
         stabilizeInitialScroll(using: proxy)
     }
 
     /// Re-applies the initial scroll anchor a few times while the layout is
-    /// still stabilizing (e.g. while attachments finish loading or the network
-    /// response replaces the cached feed). Each call supersedes the previous
-    /// one via `stabilizeToken`, so stale anchors never fire.
+    /// still stabilizing (e.g. while the network response replaces the cached
+    /// feed). Each call supersedes the previous one via `stabilizeToken`, so
+    /// stale anchors never fire. Skipped once the reader has scrolled away —
+    /// from then on the pinned id alone keeps the feed in place.
     private func stabilizeInitialScroll(using proxy: ScrollViewProxy) {
         guard let target = initialScrollTarget,
               let stabilizeInitialScrollUntil,
-              Date() <= stabilizeInitialScrollUntil else {
+              Date() <= stabilizeInitialScrollUntil,
+              !userMovedFromInitialAnchor else {
             return
         }
         
@@ -993,10 +1021,35 @@ struct ChatDetailView: View {
         let delays: [TimeInterval] = [0, 0.05, 0.12, 0.25, 0.5, 0.9, 1.5]
         for delay in delays {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard token == stabilizeToken else { return }
+                guard token == stabilizeToken, !userMovedFromInitialAnchor else { return }
                 proxy.scrollTo(target.id, anchor: target.anchor)
             }
         }
+    }
+
+    /// Cheap single re-assert used when an attachment finishes loading. While
+    /// the reader is still parked on the initial anchor this keeps them there;
+    /// after they scroll, the `scrollPosition` pin handles the reflow instead.
+    private func reassertAnchorIfStillParked(using proxy: ScrollViewProxy) {
+        guard !userMovedFromInitialAnchor, let target = initialScrollTarget else { return }
+        proxy.scrollTo(target.id, anchor: target.anchor)
+    }
+
+    /// Detects that the reader navigated away from the initial anchor and stops
+    /// every forced re-anchor from then on, so images loading in the background
+    /// can no longer drag the feed backwards.
+    private func noteReaderMovedAwayFromAnchor(_ id: String?) {
+        guard !userMovedFromInitialAnchor,
+              let id,
+              let target = initialScrollTarget,
+              id != target.id else {
+            return
+        }
+        if let ignoreUntil = ignoreScrollDetectionUntil, Date() <= ignoreUntil {
+            return
+        }
+        userMovedFromInitialAnchor = true
+        PerfBeacon.mark("Render", phase: "feedAnchorReleased", detail: "id=\(id.suffix(12))")
     }
     
     /// Tracks the word following the last "@" in the input so the mention
