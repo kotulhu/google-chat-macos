@@ -178,10 +178,14 @@ class GoogleChatService {
     /// by the previous call continues to older messages, so a feed can be
     /// progressively loaded backwards.
     ///
+    /// Passing `threadName` narrows the page to the replies of one thread; the
+    /// API accepts exactly one `thread.name` per query and rejects anything else
+    /// with `INVALID_ARGUMENT`.
+    ///
     /// Alongside the display-ready `Message` list, every page also carries the
     /// per-message record for the local SQLite history (raw JSON + deletion
     /// flag), so each call site can persist what it already received.
-    func fetchMessages(spaceId: String, pageSize: Int = 100, pageToken: String? = nil) async throws -> MessagePage {
+    func fetchMessages(spaceId: String, pageSize: Int = 100, pageToken: String? = nil, threadName: String? = nil) async throws -> MessagePage {
         var components = URLComponents(string: "\(baseURL)\(spaceId)/messages")
         var queryItems = [
             URLQueryItem(name: "pageSize", value: "\(pageSize)"),
@@ -189,6 +193,9 @@ class GoogleChatService {
         ]
         if let pageToken, !pageToken.isEmpty {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
+        }
+        if let threadName, !threadName.isEmpty {
+            queryItems.append(URLQueryItem(name: "filter", value: "thread.name = \(threadName)"))
         }
         components?.queryItems = queryItems
         
@@ -214,6 +221,13 @@ class GoogleChatService {
             let attachment: [AttachmentItem]?
             let quotedMessageMetadata: QuotedMessageMetadataItem?
             let deletionMetadata: DeletionMetadataItem?
+            let thread: ThreadItem?
+            let threadReply: Bool?
+        }
+
+        struct ThreadItem: Decodable {
+            let name: String?
+            let threadKey: String?
         }
 
         struct DeletionMetadataItem: Decodable {
@@ -312,7 +326,10 @@ class GoogleChatService {
                 attachments: attachments,
                 senderId: isFromMe ? nil : senderId,
                 quotedMessage: quotedMessage,
-                lastUpdateTime: msg.lastUpdateTime ?? msg.createTime
+                lastUpdateTime: msg.lastUpdateTime ?? msg.createTime,
+                threadName: msg.thread?.name,
+                threadKey: msg.thread?.threadKey,
+                isThreadReply: msg.threadReply ?? false
             )
         }
 
@@ -393,6 +410,53 @@ class GoogleChatService {
         return components.queryItems?.first { $0.name == "attachment_token" }?.value
     }
     
+    /// How a created message relates to a thread. Mirrors the API's
+    /// `messageReplyOption` enum; the raw strings are sent verbatim.
+    enum MessageReplyOption: String {
+        /// Default API behaviour: start a new thread, ignoring any thread id.
+        case startNewThread = "MESSAGE_REPLY_OPTION_UNSPECIFIED"
+        /// Reply to the addressed thread, starting a new one if it is gone.
+        case replyFallbackToNewThread = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+        /// Reply to the addressed thread, failing with `NOT_FOUND` if it is gone.
+        case replyOrFail = "REPLY_MESSAGE_OR_FAIL"
+    }
+
+    /// Thread addressing for an outgoing message. `name` targets an existing
+    /// thread; `key` asks the API to mint a thread we control. The two are
+    /// mutually exclusive — the API prefers `name` when both are present.
+    struct MessageThreadTarget {
+        let name: String?
+        let key: String?
+        let replyOption: MessageReplyOption?
+
+        init(name: String? = nil, key: String? = nil, replyOption: MessageReplyOption? = nil) {
+            self.name = name
+            self.key = key
+            self.replyOption = replyOption
+        }
+
+        /// Adds the `thread` object to a create-message body.
+        func apply(to body: inout [String: Any]) {
+            var thread: [String: Any] = [:]
+            if let name, !name.isEmpty { thread["name"] = name }
+            if let key, !key.isEmpty { thread["threadKey"] = key }
+            guard !thread.isEmpty else { return }
+            body["thread"] = thread
+        }
+
+        /// Adds the `messageReplyOption` query parameter to a create URL.
+        func apply(to components: inout URLComponents) {
+            guard let replyOption, let raw = replyOption.rawValue.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
+            var items = components.queryItems ?? []
+            items.append(URLQueryItem(name: "messageReplyOption", value: raw))
+            components.queryItems = items
+        }
+
+        var isEmpty: Bool {
+            (name?.isEmpty ?? true) && (key?.isEmpty ?? true)
+        }
+    }
+
     /// Builds the `quotedMessageMetadata` payload.  Google Chat expects the
     /// `lastUpdateTime` of the quoted message (createTime when never edited).
     private func quoteMetadata(name: String, lastUpdateTime: String?) -> [String: Any] {
@@ -403,8 +467,10 @@ class GoogleChatService {
         return meta
     }
 
-    func sendMessage(spaceId: String, text: String, quotedMessageId: String? = nil, quotedLastUpdateTime: String? = nil) async throws {
-        let url = URL(string: "\(baseURL)\(spaceId)/messages")!
+    func sendMessage(spaceId: String, text: String, quotedMessageId: String? = nil, quotedLastUpdateTime: String? = nil, thread: MessageThreadTarget? = nil) async throws {
+        var components = URLComponents(string: "\(baseURL)\(spaceId)/messages")!
+        thread?.apply(to: &components)
+        guard let url = components.url else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -413,12 +479,13 @@ class GoogleChatService {
         if let quotedMessageId, !quotedMessageId.isEmpty {
             body["quotedMessageMetadata"] = quoteMetadata(name: quotedMessageId, lastUpdateTime: quotedLastUpdateTime)
         }
+        thread?.apply(to: &body)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         print("📥 [Diag] create body: \(String(data: request.httpBody!, encoding: .utf8) ?? "?")")
         let (data, response) = try await authorizedData(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               (200..<300).contains(httpResponse.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
+            let body = String(decoding: data, as: UTF8.self)
             throw NSError(
                 domain: "GoogleChatSend",
                 code: (response as? HTTPURLResponse)?.statusCode ?? -1,
@@ -527,8 +594,10 @@ class GoogleChatService {
     }
     
     /// Posts a message with attachment data refs built from upload tokens.
-    func sendMessageWithAttachments(spaceId: String, text: String, attachmentUploadTokens: [String], quotedMessageId: String? = nil, quotedLastUpdateTime: String? = nil) async throws {
-        let url = URL(string: "\(baseURL)\(spaceId)/messages")!
+    func sendMessageWithAttachments(spaceId: String, text: String, attachmentUploadTokens: [String], quotedMessageId: String? = nil, quotedLastUpdateTime: String? = nil, thread: MessageThreadTarget? = nil) async throws {
+        var components = URLComponents(string: "\(baseURL)\(spaceId)/messages")!
+        thread?.apply(to: &components)
+        guard let url = components.url else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -545,6 +614,7 @@ class GoogleChatService {
         if let quotedMessageId, !quotedMessageId.isEmpty {
             body["quotedMessageMetadata"] = quoteMetadata(name: quotedMessageId, lastUpdateTime: quotedLastUpdateTime)
         }
+        thread?.apply(to: &body)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
         let (data, response) = try await URLSession.shared.data(for: request)

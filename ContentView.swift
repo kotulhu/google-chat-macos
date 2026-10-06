@@ -473,8 +473,15 @@ struct ChatDetailView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     topHistoryBar
-                    ForEach(chatVM.messages.reversed()) { message in
-                        messageRow(message, proxy: proxy, memberAvatars: memberAvatars)
+                    ForEach(chatVM.conversationMessages.reversed()) { message in
+                        VStack(alignment: .leading, spacing: 4) {
+                            messageRow(message, proxy: proxy, memberAvatars: memberAvatars)
+                            if chatVM.isThreadExpanded(message.threadName) {
+                                threadRepliesView(for: message, proxy: proxy, memberAvatars: memberAvatars)
+                            }
+                            threadExpander(for: message)
+                        }
+                        .id(message.id)
                     }
                 }
                 .scrollTargetLayout()
@@ -485,7 +492,7 @@ struct ChatDetailView: View {
                 scrollProxy = proxy
                 scrollToInitialMessage(using: proxy)
             }
-            .onChange(of: chatVM.messages) { _ in
+            .onChange(of: chatVM.conversationMessages) { _ in
                 PerfBeacon.mark("Render", phase: "messagesChanged", detail: "count=\(chatVM.messages.count)")
                 if didInitialScroll {
                     // The feed can be replaced wholesale (network response after
@@ -722,6 +729,11 @@ struct ChatDetailView: View {
             onQuote: { message in
                 quotedDraft = message
             },
+            onReplyInThread: { message in
+                chatVM.beginThreadReply(to: message)
+                newMessageText = ""
+            },
+            threadActionTitle: chatVM.threadActionTitle(for: message),
             onAddCustomIcon: {
                 isAddCustomEmojiOpen = true
             },
@@ -736,10 +748,88 @@ struct ChatDetailView: View {
             nameResolver: chatVM.nameResolver,
             memberAvatarURLs: memberAvatars
         )
-        .id(message.id)
         .onAppear {
             chatVM.markMessageAsRead(message, in: space.id)
         }
+    }
+
+    /// The replies of a thread, rendered nested under their root and indented,
+    /// matching the Google Chat layout.
+    private func threadRepliesView(for root: Message, proxy: ScrollViewProxy, memberAvatars: [String: URL]) -> some View {
+        let threadName = root.threadName ?? ""
+        let replies = chatVM.replies(inThreadNamed: threadName)
+        return VStack(alignment: .leading, spacing: 4) {
+            ForEach(replies) { reply in
+                HStack(alignment: .top, spacing: 0) {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Color.accentColor.opacity(0.35))
+                        .frame(width: 2)
+                    messageRow(reply, proxy: proxy, memberAvatars: memberAvatars)
+                        .padding(.leading, 8)
+                }
+                // Keeps quote jumps and the scroll anchor working for replies,
+                // which sit outside the root's row id.
+                .id(reply.id)
+            }
+            if chatVM.isThreadLoading(threadName) {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text(L.str("thread.loading"))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.leading, 10)
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(.leading, 12)
+    }
+
+    /// The "Show N replies" toggle under a thread root.
+    ///
+    /// Rendered only when a reply actually exists (or is being fetched): the API
+    /// gives every message a thread, so gating on the thread alone would stamp a
+    /// useless "Ответов 0" row under all 5 500 messages and reshape the feed.
+    @ViewBuilder private func threadExpander(for root: Message) -> some View {
+        let threadName = root.threadName ?? ""
+        let count = chatVM.replyCount(inThreadNamed: threadName)
+        let expanded = chatVM.isThreadExpanded(threadName)
+        let loading = chatVM.isThreadLoading(threadName)
+        if chatVM.canExpandThread(root) {
+            Button {
+                Task { await chatVM.toggleThread(rootMessageId: root.id) }
+            } label: {
+                HStack(spacing: 4) {
+                    if loading {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .font(.caption2)
+                        Text(expanderTitle(count: count, expanded: expanded))
+                            .font(.caption)
+                        Image(systemName: "chevron.down")
+                            .font(.caption2)
+                            .rotationEffect(.degrees(expanded ? 180 : 0))
+                    }
+                }
+                .foregroundColor(Color.accentColor)
+                .padding(.vertical, 2)
+                .padding(.leading, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 12)
+            .help(expanded ? L.str("thread.hide") : L.str("thread.show", count))
+        }
+    }
+
+    /// Title of the thread toggle: hidden while collapsing, singular for a
+    /// single reply, plural otherwise, and a placeholder while loading.
+    private func expanderTitle(count: Int, expanded: Bool) -> String {
+        if expanded { return L.str("thread.hide") }
+        if count == 1 { return L.str("thread.reply.one") }
+        if count == 0 { return L.str("thread.loading") }
+        return L.str("thread.replies", count)
     }
 
     /// The mention autocomplete strip shown while typing an @ mention.
@@ -785,6 +875,9 @@ struct ChatDetailView: View {
     /// The strip showing the message selected for quoting before a send, with
     /// a remove button.  Mirrors the original client's "quoted attachment".
     @ViewBuilder private var quoteStrip: some View {
+        if chatVM.threadReplyTarget != nil {
+            threadReplyStrip
+        }
         if let quoted = quotedDraft {
             HStack(spacing: 8) {
                 RoundedRectangle(cornerRadius: 1)
@@ -817,6 +910,41 @@ struct ChatDetailView: View {
             .padding(.horizontal)
             .padding(.bottom, 4)
         }
+    }
+
+    /// Banner shown while the composer is scoped to a thread, with a button to
+    /// leave the thread and post to the conversation again.
+    private var threadReplyStrip: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+                .foregroundColor(Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L.str("thread.replying"))
+                    .font(.caption.weight(.semibold))
+                if let rootId = chatVM.threadReplyTarget?.rootMessageId,
+                   let root = chatVM.messages.first(where: { $0.id == rootId }),
+                   !root.text.isEmpty {
+                    Text(root.text)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer()
+            Button {
+                chatVM.cancelThreadReply()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(L.str("thread.cancel"))
+        }
+        .padding(8)
+        .background(Color.accentColor.opacity(0.12))
+        .cornerRadius(8)
+        .padding(.horizontal)
+        .padding(.bottom, 4)
     }
 
     /// The bottom bar: message edit mode or the composer with attachments.
@@ -874,7 +1002,7 @@ struct ChatDetailView: View {
                         Task { await chatVM.loadMembers(for: space.id) }
                     }
                     
-                    if scheduleSendLater {
+if scheduleSendLater, chatVM.threadReplyTarget == nil {
                         DatePicker(
                             "",
                             selection: $scheduleDate,
@@ -932,7 +1060,8 @@ struct ChatDetailView: View {
         guard !chatVM.isSending else { return }
         let quoteId = quotedDraft?.id
         let quoteLastUpdateTime = quotedDraft?.lastUpdateTime
-        if scheduleSendLater {
+        let threadTarget = chatVM.threadReplyTarget
+        if scheduleSendLater, threadTarget == nil {
             let scheduled = chatVM.scheduleMessage(
                 spaceId: space.id,
                 text: text,
@@ -966,13 +1095,13 @@ struct ChatDetailView: View {
             if uploadFailed {
                 return
             }
-            let sent = await chatVM.sendMessage(text, attachments: attachmentUploadTokens, quotedMessageId: quoteId, quotedLastUpdateTime: quoteLastUpdateTime)
+            let sent = await chatVM.sendMessage(text, attachments: attachmentUploadTokens, quotedMessageId: quoteId, quotedLastUpdateTime: quoteLastUpdateTime, threadTarget: threadTarget)
             guard sent else { return }
             newMessageText = ""
             selectedFiles = []
             quotedDraft = nil
             
-            if let firstId = chatVM.messages.first?.id {
+            if let firstId = chatVM.conversationMessages.first?.id {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     withAnimation {
                         scrollProxy?.scrollTo(firstId, anchor: .bottom)

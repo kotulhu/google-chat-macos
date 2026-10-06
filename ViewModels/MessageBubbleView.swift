@@ -14,6 +14,11 @@ struct MessageBubbleView: View {
     var onEdit: ((Message) -> Void)? = nil
     var onDelete: ((Message) -> Void)? = nil
     var onQuote: ((Message) -> Void)? = nil
+    /// Starts a thread reply for this message (or a new thread when it has none).
+    var onReplyInThread: ((Message) -> Void)? = nil
+    /// Label for the thread action, supplied by the view model so it can tell
+    /// whether the thread already exists. Falls back to "start thread".
+    var threadActionTitle: String? = nil
     /// Opens the "add custom icon" upload sheet.
     var onAddCustomIcon: (() -> Void)? = nil
     /// Looks up the live message for a quoted id in the current feed.
@@ -127,6 +132,9 @@ if let quoted = message.quotedMessage {
             }
             Button(L.str("quote")) {
                 onQuote?(message)
+            }
+            Button(threadActionTitle ?? L.str("thread.new")) {
+                onReplyInThread?(message)
             }
             if message.isFromMe {
                 Button(L.str("edit")) {

@@ -101,6 +101,18 @@ public enum RussianStrings {
         "quote.jump": "Перейти к цитируемому сообщению",
         "more.reactions": "Другие реакции...",
 
+        // Треды
+        "thread.reply": "Ответить в треде",
+        "thread.new": "Создать тред",
+        "thread.replies": "Ответов: %d",
+        "thread.reply.one": "1 ответ",
+        "thread.show": "Показать ответы (%d)",
+        "thread.hide": "Скрыть ответы",
+        "thread.loading": "Загрузка ответов...",
+        "thread.replying": "Ответ в треде",
+        "thread.cancel": "Отменить ответ в треде",
+        "err.thread.load": "Ошибка загрузки ответов в треде: %@",
+
         // Custom icons
         "add.custom.icon": "Добавить иконку...",
         "add.custom.icon.title": "Добавить иконку",

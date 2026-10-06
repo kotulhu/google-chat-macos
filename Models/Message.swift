@@ -65,6 +65,39 @@ struct Message: Identifiable, Equatable, Codable {
     /// Server-format timestamp (`createTime` fallback) sent to the API inside
     /// `quotedMessageMetadata.lastUpdateTime` when this message is quoted.
     let lastUpdateTime: String?
+    /// `spaces/{space}/threads/{thread}`. Present on **every** message the API
+    /// returns: a message that has never been replied to still gets a thread id
+    /// equal to its own message id, so this alone does not mark a thread.
+    var threadName: String?
+    /// Client-assigned thread key. Only ever set on messages this app created;
+    /// for everyone else the API reports it as output only.
+    var threadKey: String?
+    /// Output-only API flag, present only when `true`: the message is a reply
+    /// inside a thread. Replies are hidden from the top-level conversation and
+    /// shown nested under their root instead.
+    var isThreadReply: Bool = false
+
+    /// Last component of `threadName` — the id Google Chat assigns to the
+    /// thread. For a standalone message it equals the id of the message itself,
+    /// which is exactly the id a future reply will join.
+    var threadId: String? {
+        guard let name = threadName, !name.isEmpty else { return nil }
+        return name.split(separator: "/").last.map(String.init)
+    }
+
+    /// True when this message is itself the root of a thread rather than a
+    /// reply. Its `threadName` is then only a placeholder until something is
+    /// posted into it.
+    var isThreadRoot: Bool {
+        !isThreadReply
+    }
+
+    /// The resource name a reply addressed to this message's thread should use.
+    /// Meaningful only for messages that already live inside a thread.
+    var existingThreadName: String? {
+        guard isThreadReply else { return nil }
+        return threadName
+    }
     
     init(
         id: String = UUID().uuidString,
@@ -76,7 +109,10 @@ struct Message: Identifiable, Equatable, Codable {
         senderId: String?,
         reactions: [MessageReaction] = [],
         quotedMessage: QuotedMessage? = nil,
-        lastUpdateTime: String? = nil
+        lastUpdateTime: String? = nil,
+        threadName: String? = nil,
+        threadKey: String? = nil,
+        isThreadReply: Bool = false
     ) {
         self.id = id
         self.text = text
@@ -88,6 +124,9 @@ struct Message: Identifiable, Equatable, Codable {
         self.reactions = reactions
         self.quotedMessage = quotedMessage
         self.lastUpdateTime = lastUpdateTime
+        self.threadName = threadName
+        self.threadKey = threadKey
+        self.isThreadReply = isThreadReply
     }
     
     init(from decoder: Decoder) throws {
@@ -102,6 +141,9 @@ struct Message: Identifiable, Equatable, Codable {
         reactions = try container.decodeIfPresent([MessageReaction].self, forKey: .reactions) ?? []
         quotedMessage = try container.decodeIfPresent(QuotedMessage.self, forKey: .quotedMessage)
         lastUpdateTime = try container.decodeIfPresent(String.self, forKey: .lastUpdateTime)
+        threadName = try container.decodeIfPresent(String.self, forKey: .threadName)
+        threadKey = try container.decodeIfPresent(String.self, forKey: .threadKey)
+        isThreadReply = try container.decodeIfPresent(Bool.self, forKey: .isThreadReply) ?? false
     }
     
     static func == (lhs: Message, rhs: Message) -> Bool {
@@ -113,7 +155,10 @@ struct Message: Identifiable, Equatable, Codable {
         lhs.attachments == rhs.attachments &&
         lhs.reactions == rhs.reactions &&
         lhs.quotedMessage == rhs.quotedMessage &&
-        lhs.lastUpdateTime == rhs.lastUpdateTime
+        lhs.lastUpdateTime == rhs.lastUpdateTime &&
+        lhs.threadName == rhs.threadName &&
+        lhs.threadKey == rhs.threadKey &&
+        lhs.isThreadReply == rhs.isThreadReply
     }
     
     private enum CodingKeys: String, CodingKey {
@@ -127,5 +172,8 @@ struct Message: Identifiable, Equatable, Codable {
         case reactions
         case quotedMessage
         case lastUpdateTime
+        case threadName
+        case threadKey
+        case isThreadReply
     }
 }

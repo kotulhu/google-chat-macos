@@ -100,6 +100,18 @@ public enum EnglishStrings {
         "quote.jump": "Go to the original message",
         "more.reactions": "More reactions...",
 
+        // Threads
+        "thread.reply": "Reply in thread",
+        "thread.new": "Start thread",
+        "thread.replies": "%d replies",
+        "thread.reply.one": "1 reply",
+        "thread.show": "Show %d replies",
+        "thread.hide": "Hide replies",
+        "thread.loading": "Loading replies...",
+        "thread.replying": "Replying in thread",
+        "thread.cancel": "Cancel thread reply",
+        "err.thread.load": "Failed to load thread replies: %@",
+
         // Custom icons
         "add.custom.icon": "Add custom icon...",
         "add.custom.icon.title": "Add custom icon",

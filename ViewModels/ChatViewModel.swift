@@ -439,7 +439,13 @@ class ChatViewModel: NSObject,ObservableObject {
                     }
                 }
             }
+            let previousSpaceId = lastLoadedSpaceId
             lastLoadedSpaceId = space.id
+            if lastLoadedSpaceId != previousSpaceId {
+                // Thread expansion and fetched replies belong to the space we
+                // just left, so they must not leak into the newly opened chat.
+                resetThreadState()
+            }
 
             PerfBeacon.start("Lenta", phase: "assign")
             if changed {
@@ -912,17 +918,32 @@ class ChatViewModel: NSObject,ObservableObject {
 
     /// Sends a message, optionally with uploaded attachments and/or a quoted
     /// message, then reloads the space so the new message appears immediately.
+    /// When `threadTarget` is set the message is posted as a thread reply and
+    /// the composer's target is consumed.
     @discardableResult
-    func sendMessage(_ text: String, attachments: [String] = [], quotedMessageId: String? = nil, quotedLastUpdateTime: String? = nil) async -> Bool {
+    func sendMessage(_ text: String, attachments: [String] = [], quotedMessageId: String? = nil, quotedLastUpdateTime: String? = nil, threadTarget: ThreadReplyTarget? = nil) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let service = chatService, let space = selectedSpace else { return false }
+        let thread = threadTarget?.serviceTarget
         do {
             if attachments.isEmpty {
-                try await service.sendMessage(spaceId: space.id, text: trimmed, quotedMessageId: quotedMessageId, quotedLastUpdateTime: quotedLastUpdateTime)
+                try await service.sendMessage(spaceId: space.id, text: trimmed, quotedMessageId: quotedMessageId, quotedLastUpdateTime: quotedLastUpdateTime, thread: thread)
             } else {
-                try await service.sendMessageWithAttachments(spaceId: space.id, text: trimmed, attachmentUploadTokens: attachments, quotedMessageId: quotedMessageId, quotedLastUpdateTime: quotedLastUpdateTime)
+                try await service.sendMessageWithAttachments(spaceId: space.id, text: trimmed, attachmentUploadTokens: attachments, quotedMessageId: quotedMessageId, quotedLastUpdateTime: quotedLastUpdateTime, thread: thread)
             }
             await loadMessages(for: space)
+            if let threadTarget {
+                // The reply only becomes visible once its thread is expanded:
+                // `conversationMessages` hides replies whose root is loaded.
+                // A target addressed by `threadKey` does not carry the final
+                // thread name, so reconstruct it from the space and the key —
+                // that is the name Google Chat derives for a new thread.
+                threadReplyTarget = nil
+                if let name = effectiveThreadName(for: threadTarget, spaceId: space.id), !name.isEmpty {
+                    expandedThreadNames.insert(name)
+                    await loadThreadReplies(named: name)
+                }
+            }
             return true
         } catch {
             if let nsError = error as NSError?, nsError.domain == "GoogleChatSend", nsError.code == 403 {
@@ -1301,6 +1322,239 @@ class ChatViewModel: NSObject,ObservableObject {
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
     
+    // MARK: - Threads
+
+    /// A thread the composer is currently replying into. `threadName` addresses
+    /// an existing thread; `threadKey` asks the API for a new thread we own.
+    struct ThreadReplyTarget: Equatable {
+        let threadName: String?
+        let threadKey: String?
+        let rootMessageId: String
+
+        /// Starts a reply inside an existing thread.
+        static func reply(threadName: String, rootMessageId: String) -> ThreadReplyTarget {
+            ThreadReplyTarget(threadName: threadName, threadKey: nil, rootMessageId: rootMessageId)
+        }
+
+        /// Starts a brand new thread; the message we send becomes its root.
+        ///
+        /// Google Chat derives a thread id from the root message id
+        /// (`…/messages/ABC.ABC` → `…/threads/ABC`), so passing that id as the
+        /// key reproduces exactly what the official client would produce. Only
+        /// when the message carries no id of its own do we fall back to a key we
+        /// generate.
+        static func newThread(rootMessageId: String, threadKey: String? = nil) -> ThreadReplyTarget {
+            ThreadReplyTarget(
+                threadName: nil,
+                threadKey: threadKey ?? "gk-\(UUID().uuidString)",
+                rootMessageId: rootMessageId
+            )
+        }
+
+        /// Service-level payload. Falls back to creating a thread when the one
+        /// we addressed disappeared, so a send never fails on a stale thread.
+        var serviceTarget: GoogleChatService.MessageThreadTarget {
+            GoogleChatService.MessageThreadTarget(
+                name: threadName,
+                key: threadKey,
+                replyOption: .replyFallbackToNewThread
+            )
+        }
+    }
+
+    /// Thread the composer replies into, or nil when sending to the conversation.
+    @Published var threadReplyTarget: ThreadReplyTarget?
+    /// Thread names whose replies are currently shown under their root.
+    @Published private(set) var expandedThreadNames: Set<String> = []
+    /// Replies fetched on demand, keyed by thread name and ordered oldest first.
+    @Published private(set) var threadReplies: [String: [Message]] = [:]
+    /// Thread names with a request in flight.
+    @Published private(set) var loadingThreadNames: Set<String> = []
+
+    /// The top-level conversation, newest first. Replies are removed only when
+    /// their root is also loaded, because then they are rendered nested under it.
+    /// A reply whose root is older than the loaded window stays as a top-level
+    /// row: hiding it would make a loaded message disappear entirely.
+    var conversationMessages: [Message] {
+        let loadedRootThreads = Set(messages.filter { !$0.isThreadReply }.compactMap { $0.threadName })
+        return messages.filter { message in
+            guard message.isThreadReply, let name = message.threadName else { return true }
+            return !loadedRootThreads.contains(name)
+        }
+    }
+
+    /// Replies of one thread, oldest first, merged from the main feed (they
+    /// arrive there through ordinary polling) and from an explicit thread fetch.
+    func replies(inThreadNamed name: String) -> [Message] {
+        guard !name.isEmpty else { return [] }
+        var seen = Set<String>()
+        let merged = messages.filter { $0.isThreadReply && $0.threadName == name }
+            + (threadReplies[name] ?? [])
+        return merged
+            .filter { seen.insert($0.id).inserted }
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+
+    /// Number of replies already known for a thread; drives the "N replies" row.
+    func replyCount(inThreadNamed name: String?) -> Int {
+        guard let name, !name.isEmpty else { return 0 }
+        return replies(inThreadNamed: name).count
+    }
+
+    /// Whether the thread behind a message is currently expanded.
+    func isThreadExpanded(_ name: String?) -> Bool {
+        guard let name, !name.isEmpty else { return false }
+        return expandedThreadNames.contains(name)
+    }
+
+    /// Whether a thread page is currently being fetched.
+    func isThreadLoading(_ name: String?) -> Bool {
+        guard let name, !name.isEmpty else { return false }
+        return loadingThreadNames.contains(name)
+    }
+
+    /// Whether an expandable reply row belongs under this message.
+    ///
+    /// The API hands every message a `threadName`, so carrying one proves
+    /// nothing: an expander is only useful once a reply actually exists (or is
+    /// being fetched). Without this guard every row would grow a phantom
+    /// "0 replies" link and change the feed height for all 5 500 messages.
+    func canExpandThread(_ message: Message) -> Bool {
+        guard !message.isThreadReply,
+              let name = message.threadName, !name.isEmpty else { return false }
+        return replyCount(inThreadNamed: name) > 0
+            || expandedThreadNames.contains(name)
+            || loadingThreadNames.contains(name)
+    }
+
+    /// Label for the thread item of a message's context menu. Google Chat offers
+    /// the same action for every message; only the wording changes once the
+    /// thread exists.
+    func threadActionTitle(for message: Message) -> String {
+        if message.isThreadReply { return L.str("thread.reply") }
+        let name = message.threadName
+        if isThreadExpanded(name) || replyCount(inThreadNamed: name) > 0 {
+            return L.str("thread.reply")
+        }
+        return L.str("thread.new")
+    }
+
+    /// True when the message has a thread we can address directly — i.e. it is
+    /// itself a reply. A standalone message has no thread yet; it gets one from
+    /// its own id when the first reply is posted.
+    func hasThread(_ message: Message) -> Bool {
+        guard let name = message.threadName else { return false }
+        return !name.isEmpty && (message.isThreadReply || replyCount(inThreadNamed: name) > 0)
+    }
+
+    /// Expands or collapses the thread behind a root message, fetching its
+    /// replies the first time it is opened.
+    func toggleThread(rootMessageId: String) async {
+        guard let root = messages.first(where: { $0.id == rootMessageId }),
+              let name = root.threadName, !name.isEmpty else {
+            return
+        }
+        if expandedThreadNames.contains(name) {
+            expandedThreadNames.remove(name)
+            return
+        }
+        expandedThreadNames.insert(name)
+        await loadThreadReplies(named: name)
+    }
+
+    /// Fetches a thread's replies through `filter=thread.name = …`, which is the
+    /// only way the API exposes them (there is no replies sub-resource). Pages
+    /// are followed until the thread is exhausted, capped so one huge thread
+    /// cannot stall the feed.
+    func loadThreadReplies(named name: String, maxPages: Int = 5) async {
+        guard !name.isEmpty,
+              !loadingThreadNames.contains(name),
+              let service = chatService,
+              let space = selectedSpace else { return }
+        loadingThreadNames.insert(name)
+        defer { loadingThreadNames.remove(name) }
+
+        var collected: [Message] = []
+        var pageToken: String?
+        var pages = 0
+        do {
+            while pages < maxPages {
+                pages += 1
+                let page = try await service.fetchMessages(
+                    spaceId: space.id,
+                    pageSize: 100,
+                    pageToken: pageToken,
+                    threadName: name
+                )
+                MessageHistoryStore.shared.upsertMessages(page.history)
+                collected.append(contentsOf: page.messages.filter { $0.isThreadReply })
+                guard let next = page.nextPageToken, !next.isEmpty else { break }
+                pageToken = next
+            }
+        } catch {
+            guard !isCancellation(error) else { return }
+            print("❌ Failed to load thread \(name): \(error)")
+            errorMessage = L.str("err.thread.load", error.localizedDescription)
+        }
+
+        guard !collected.isEmpty else { return }
+        await nameResolver.resolve(userIds: Set(collected.compactMap { $0.senderId }))
+        let resolved = collected.map { msg -> Message in
+            var copy = msg
+            if let senderId = msg.senderId, !msg.isFromMe {
+                copy.authorName = nameResolver.displayName(for: senderId)
+            } else if msg.isFromMe {
+                copy.authorName = currentUserDisplayName
+            }
+            if let cached = reactionCache[msg.id] {
+                copy.reactions = cached
+            }
+            return copy
+        }
+
+        var merged = (threadReplies[name] ?? []) + resolved
+        var seen = Set<String>()
+        merged = merged.filter { seen.insert($0.id).inserted }
+        threadReplies[name] = merged.sorted { $0.timestamp < $1.timestamp }
+        PerfBeacon.mark("Lenta", phase: "threadLoaded", detail: "replies=\(merged.count), pages=\(pages)")
+    }
+
+    /// Points the composer at the thread of `message`.
+    ///
+    /// A message that already sits inside a thread is addressed by its
+    /// `threadName`, which is guaranteed to exist. A message that was never
+    /// replied to has no thread resource yet, so it is addressed by `threadKey`
+    /// derived from its own id — the same id Google Chat would assign.
+    func beginThreadReply(to message: Message) {
+        if hasThread(message), let name = message.threadName {
+            threadReplyTarget = .reply(threadName: name, rootMessageId: message.id)
+            expandedThreadNames.insert(name)
+        } else {
+            threadReplyTarget = .newThread(rootMessageId: message.id, threadKey: message.threadId)
+        }
+    }
+
+    /// Name of the thread a target resolves to, or nil when nothing to expand.
+    /// `threadKey` targets name the thread `spaces/{space}/threads/{key}`.
+    private func effectiveThreadName(for target: ThreadReplyTarget, spaceId: String) -> String? {
+        if let name = target.threadName, !name.isEmpty { return name }
+        if let key = target.threadKey, !key.isEmpty { return "\(spaceId)/threads/\(key)" }
+        return nil
+    }
+
+    /// Drops the composer's thread target without sending anything.
+    func cancelThreadReply() {
+        threadReplyTarget = nil
+    }
+
+    /// Clears all thread state when the open space changes.
+    func resetThreadState() {
+        threadReplyTarget = nil
+        expandedThreadNames.removeAll()
+        threadReplies.removeAll()
+        loadingThreadNames.removeAll()
+    }
+
     /// Returns the ID of the last message the user has already read: the
     /// **newest** message at or before the space's persisted read mark, or the
     /// newest message when nothing has been marked read yet.
@@ -1321,19 +1575,24 @@ class ChatViewModel: NSObject,ObservableObject {
     /// last-read message, so reopening a chat resumes where the user left off
     /// (with any unread messages just below the anchor). Falls back to the
     /// newest message when the whole chat has been read.
+    ///
+    /// Only the top-level conversation is considered — anchoring to a thread
+    /// reply would land the reader on a row that is nested and possibly
+    /// collapsed.
     func initialScrollTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
-        guard let id = lastReadMessageId(in: messages, spaceId: spaceId) else { return nil }
+        guard let id = lastReadMessageId(in: conversationMessages, spaceId: spaceId) else { return nil }
         return (id, .bottom)
     }
 
     /// Target for the floating "jump to unread" button: the newest unread
     /// message, or the newest message when everything has been read.
     func jumpTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
+        let conversation = conversationMessages
         if let lastRead = loadLastReadTimestamp(for: spaceId),
-           let newestUnread = messages.first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
+           let newestUnread = conversation.first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
             return (newestUnread.id, .bottom)
         }
-        return messages.first.map { ($0.id, .bottom) }
+        return conversation.first.map { ($0.id, .bottom) }
     }
 
     /// The current unread badge count for a space (drives the jump-to-unread button).
