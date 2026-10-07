@@ -676,14 +676,17 @@ struct ChatDetailView: View {
     }
 
     /// Scrolls the message list to its newest top-level message.
+    ///
+    /// Deliberately unanimated: the reader pressed a "go to the end" button and
+    /// expects to be there at once. Animating also overlaps the window in which
+    /// image and reaction updates re-schedule `stabilizeInitialScroll` back to
+    /// the initial anchor, which showed up as the feed fighting itself.
     private func scrollToNewestMessage() {
         guard let target = chatVM.newestMessageTarget() else { return }
         if target.id != initialScrollTarget?.id {
             takeFeedOwnership()
         }
-        withAnimation(.easeInOut(duration: 0.25)) {
-            scrollProxy?.scrollTo(target.id, anchor: target.anchor)
-        }
+        scrollProxy?.scrollTo(target.id, anchor: target.anchor)
     }
 
     /// Hands the feed back to the reader after an explicit jump by cancelling
@@ -691,9 +694,9 @@ struct ChatDetailView: View {
     ///
     /// The rows the jump reveals load their reactions and images, and each of
     /// those updates mutates `conversationMessages`, which re-schedules the
-    /// whole `stabilizeInitialScroll` burst back towards the initial anchor —
-    /// while the jump animation is still running towards the bottom of the feed.
-    /// The two scroll to different ids and the feed is yanked back and forth.
+    /// whole `stabilizeInitialScroll` burst back towards the initial anchor right
+    /// after the jump landed. The two scroll to different ids and the feed is
+    /// yanked back and forth.
     /// Latching the flag also stops `reassertAnchorIfStillParked`, which would
     /// otherwise keep pulling the same way, and clears the detection grace period
     /// so the jump itself counts as reader movement rather than being mistaken
