@@ -79,6 +79,22 @@ public enum RussianStrings {
         "settings.oauth.note": "OAuth Client ID используется при входе. Reversed Client ID генерируется из него автоматически и должен совпадать со значением GOOGLE_REVERSED_CLIENT_ID в локальном GoogleChat.local.xcconfig, потому что macOS регистрирует callback из Info.plist при сборке приложения.",
         "settings.reversed.help": "Только для чтения – выводится из OAuth Client ID разворотом dot-компонентов.",
 
+        // Проверка уведомлений
+        "settings.notify.section": "Уведомления",
+        "settings.notify.status": "Разрешение",
+        "settings.notify.status.granted": "Разрешены",
+        "settings.notify.status.denied": "Запрещены",
+        "settings.notify.status.provisional": "Временные",
+        "settings.notify.status.ephemeral": "Эфемерные",
+        "settings.notify.status.notdetermined": "Ещё не запрашивалось",
+        "settings.notify.status.unknown": "Неизвестно",
+        "settings.notify.test": "Отправить тестовое уведомление",
+        "settings.notify.test.title": "Тестовое уведомление",
+        "settings.notify.test.body": "Если вы это читаете — уведомления работают.",
+        "settings.notify.test.ok": "Отправлено — macOS приняла уведомление.",
+        "settings.notify.test.failed": "Ошибка: %@",
+        "settings.notify.test.denied": "Уведомления отключены для приложения в Системных настройках → Уведомления.",
+
         // Reaction picker
         "reaction.picker.title": "Выбор реакции",
         "reaction.search.placeholder": "Поиск эмодзи",

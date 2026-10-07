@@ -78,6 +78,22 @@ public enum EnglishStrings {
         "settings.oauth.note": "OAuth Client ID is used for signing in. The Reversed Client ID is generated from it automatically and must match the value baked into the app (GOOGLE_REVERSED_CLIENT_ID in GoogleChat.local.xcconfig), because macOS registers the OAuth callback URL scheme from Info.plist at build time.",
         "settings.reversed.help": "Read-only – derived from the OAuth Client ID by reversing its dot-separated components.",
 
+        // Notifications self-test
+        "settings.notify.section": "Notifications",
+        "settings.notify.status": "Permission",
+        "settings.notify.status.granted": "Allowed",
+        "settings.notify.status.denied": "Denied",
+        "settings.notify.status.provisional": "Provisional",
+        "settings.notify.status.ephemeral": "Ephemeral",
+        "settings.notify.status.notdetermined": "Not requested yet",
+        "settings.notify.status.unknown": "Unknown",
+        "settings.notify.test": "Send test notification",
+        "settings.notify.test.title": "Test notification",
+        "settings.notify.test.body": "If you can read this, notifications work.",
+        "settings.notify.test.ok": "Sent — the notification was accepted by macOS.",
+        "settings.notify.test.failed": "Failed: %@",
+        "settings.notify.test.denied": "Notifications are switched off for this app in System Settings → Notifications.",
+
         // Reaction picker
         "reaction.picker.title": "Choose reaction",
         "reaction.search.placeholder": "Search emoji",

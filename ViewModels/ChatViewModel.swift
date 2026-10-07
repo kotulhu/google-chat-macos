@@ -1643,21 +1643,10 @@ class ChatViewModel: NSObject,ObservableObject {
     private func sendNotification(for message: Message, in space: ChatSpace) {
         guard !message.isFromMe else { return }
 
-        let content = UNMutableNotificationContent()
-        content.title = space.name
-        content.body = "\(message.authorName): \(message.text)"
-        content.sound = .default
-        content.userInfo = ["spaceId": space.id]
         NSSound.beep()
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        print("🔔 [Notify] sending: \"\(space.name)\" — \(message.authorName): \(message.text.prefix(40))")
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                print("🔔 [Notify] ERROR: \(error.localizedDescription)")
-            } else {
-                print("🔔 [Notify] OK id=\(request.identifier)")
-            }
-        }
+        let author = message.authorName
+        let body = "\(author): \(message.text)"
+        Task { await LocalNotifier.post(title: space.name, body: body, spaceId: space.id) }
     }
     
     /// Opens the chat of a space; used when the user clicks a notification.
@@ -1971,23 +1960,10 @@ class ChatViewModel: NSObject,ObservableObject {
         return resolved
     }
     
-    /// Posts a sample welcome notification, used to demonstrate the badge
-    /// and notification flow right after a successful sign-in.
+    /// Shows the startup notification. Delegates to `LocalNotifier`, which
+    /// latches it for the session so the launch path cannot post a duplicate.
     func sendWelcomeNotification() {
-        let testMessage = Message(
-            text: L.str("welcome.message"),
-            authorName: "Google Chat",
-            isFromMe: false,
-            timestamp: Date(),
-            senderId: nil
-        )
-        let testSpace = ChatSpace(
-            id: "welcome",
-            name: L.str("welcome.space"),
-            type: .direct,
-            lastMessage: nil
-        )
-        sendNotification(for: testMessage, in: testSpace)
+        Task { await LocalNotifier.sendWelcomeIfNeeded() }
     }
 }
 

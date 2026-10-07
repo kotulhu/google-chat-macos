@@ -21,9 +21,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             andEventID: AEEventID(kAEGetURL))
         
         UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
-            if granted {
-                print("✅ Notifications allowed")
+        // Authorization is asked here rather than lazily at first send: without
+        // it every later `add()` is rejected and the failure is invisible. The
+        // startup notification is posted as soon as permission is confirmed.
+        Task {
+            if await LocalNotifier.requestAuthorization() {
+                await LocalNotifier.sendWelcomeIfNeeded()
+            } else {
+                print("🔔 Notifications are not allowed — nothing will be posted")
             }
         }
 
