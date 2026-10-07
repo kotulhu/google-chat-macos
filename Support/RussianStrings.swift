@@ -39,7 +39,7 @@ public enum RussianStrings {
         "delete": "Удалить",
         "save": "Сохранить",
         "edit.placeholder": "Редактировать сообщение...",
-        "jump.unread.hint": "К последнему непрочитанному сообщению",
+        "jump.unread.hint": "К последнему сообщению",
 
         // Member management
         "members.title": "Участники",

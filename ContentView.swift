@@ -509,7 +509,7 @@ struct ChatDetailView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            jumpToUnreadButton
+            jumpToNewestButton
         }
         .overlay {
             if chatVM.isExporting {
@@ -650,10 +650,10 @@ struct ChatDetailView: View {
         formatter.dateFormat = L.isRussian ? "d MMM yyyy, HH:mm" : "MMM d, yyyy, HH:mm"
         return formatter.string(from: date)
     }
-    private var jumpToUnreadButton: some View {
+    private var jumpToNewestButton: some View {
         let unread = chatVM.unreadCount(for: space.id)
         return Button {
-            jumpToFirstUnread()
+            scrollToNewestMessage()
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: unread > 0 ? "arrow.down.circle.fill" : "arrow.down.to.line")
@@ -675,13 +675,34 @@ struct ChatDetailView: View {
         .help(L.str("jump.unread.hint"))
     }
 
-    /// Scrolls the message list to the latest unread message, falling back to
-    /// the newest one when there is nothing unread.
-    private func jumpToFirstUnread() {
-        guard let target = chatVM.jumpTarget(for: space.id) else { return }
+    /// Scrolls the message list to its newest top-level message.
+    private func scrollToNewestMessage() {
+        guard let target = chatVM.newestMessageTarget() else { return }
+        if target.id != initialScrollTarget?.id {
+            takeFeedOwnership()
+        }
         withAnimation(.easeInOut(duration: 0.25)) {
             scrollProxy?.scrollTo(target.id, anchor: target.anchor)
         }
+    }
+
+    /// Hands the feed back to the reader after an explicit jump by cancelling
+    /// every remaining forced re-anchor.
+    ///
+    /// The rows the jump reveals load their reactions and images, and each of
+    /// those updates mutates `conversationMessages`, which re-schedules the
+    /// whole `stabilizeInitialScroll` burst back towards the initial anchor —
+    /// while the jump animation is still running towards the bottom of the feed.
+    /// The two scroll to different ids and the feed is yanked back and forth.
+    /// Latching the flag also stops `reassertAnchorIfStillParked`, which would
+    /// otherwise keep pulling the same way, and clears the detection grace period
+    /// so the jump itself counts as reader movement rather than being mistaken
+    /// for a programmatic one.
+    private func takeFeedOwnership() {
+        userMovedFromInitialAnchor = true
+        stabilizeToken &+= 1
+        stabilizeInitialScrollUntil = nil
+        ignoreScrollDetectionUntil = nil
     }
 
     /// Avatar URLs from the space's membership list, keyed by `users/...` id.

@@ -1584,15 +1584,15 @@ class ChatViewModel: NSObject,ObservableObject {
         return (id, .bottom)
     }
 
-    /// Target for the floating "jump to unread" button: the newest unread
-    /// message, or the newest message when everything has been read.
-    func jumpTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
-        let conversation = conversationMessages
-        if let lastRead = loadLastReadTimestamp(for: spaceId),
-           let newestUnread = conversation.first(where: { !$0.isFromMe && $0.timestamp > lastRead }) {
-            return (newestUnread.id, .bottom)
-        }
-        return conversation.first.map { ($0.id, .bottom) }
+    /// Target for the floating scroll button: the newest top-level message, so the
+    /// button simply takes the reader to the bottom of the feed.
+    ///
+    /// Deliberately not the newest *unread* message: that id sits in the middle
+    /// of the list, and pinning a mid-list row to the `.bottom` anchor makes
+    /// SwiftUI keep re-placing it as the rows below it materialise — which is
+    /// what made the feed jerk. The bottom of the list has no such ambiguity.
+    func newestMessageTarget() -> (id: String, anchor: UnitPoint)? {
+        conversationMessages.first.map { ($0.id, .bottom) }
     }
 
     /// The current unread badge count for a space (drives the jump-to-unread button).
