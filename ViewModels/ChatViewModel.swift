@@ -1555,33 +1555,16 @@ class ChatViewModel: NSObject,ObservableObject {
         loadingThreadNames.removeAll()
     }
 
-    /// Returns the ID of the last message the user has already read: the
-    /// **newest** message at or before the space's persisted read mark, or the
-    /// newest message when nothing has been marked read yet.
-    ///
-    /// The in-memory list is newest-first, so the newest message at or before
-    /// the mark is found with `first(where:)` — using `last(where:)` here would
-    /// return the *oldest* loaded message and send the feed to the very top.
-    func lastReadMessageId(in messages: [Message], spaceId: String) -> String? {
-        guard !messages.isEmpty else { return nil }
-        if let lastRead = loadLastReadTimestamp(for: spaceId),
-           let lastReadMessage = messages.first(where: { $0.timestamp <= lastRead }) {
-            return lastReadMessage.id
-        }
-        return messages.first?.id
-    }
-    
-    /// Chooses where the message list should initially scroll: always the
-    /// last-read message, so reopening a chat resumes where the user left off
-    /// (with any unread messages just below the anchor). Falls back to the
-    /// newest message when the whole chat has been read.
+    /// Chooses where the message list is placed when a chat opens: always the
+    /// newest top-level message, so every chat starts at the end of the
+    /// conversation rather than resuming at the read mark.
     ///
     /// Only the top-level conversation is considered — anchoring to a thread
     /// reply would land the reader on a row that is nested and possibly
-    /// collapsed.
+    /// collapsed. Returns nil while the feed is still empty, which keeps the
+    /// initial scroll pending until the first page arrives.
     func initialScrollTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
-        guard let id = lastReadMessageId(in: conversationMessages, spaceId: spaceId) else { return nil }
-        return (id, .bottom)
+        conversationMessages.first.map { ($0.id, .bottom) }
     }
 
     /// Target for the floating scroll button: the newest top-level message, so the
@@ -1630,6 +1613,71 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Loads a space's persisted last-read timestamp.
     private func loadLastReadTimestamp(for spaceId: String) -> Date? {
         return defaults.object(forKey: lastReadKeyPrefix + spaceId) as? Date
+    }
+
+    /// Marks a space as read: the read mark moves past every message, the badge
+    /// clears, and the same position is pushed to Google Chat so the official
+    /// clients agree.
+    ///
+    /// The local half runs first and unconditionally, so the badge clears even
+    /// when the read-state API is unavailable or the scope is refused.
+    func markSpaceAsRead(_ spaceId: String) async {
+        let now = Date()
+        saveLastReadTimestamp(for: spaceId, date: now)
+        if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
+            spaces[index].lastReadTimestamp = now
+            spaces[index].unreadCount = 0
+        }
+        updateDockBadge()
+        await pushSpaceReadState(spaceId: spaceId, lastRead: now)
+    }
+
+    /// Marks a space as unread: the read mark slides just before its newest
+    /// incoming message, which brings the sidebar badge back showing 1.
+    ///
+    /// The newest page is fetched rather than read from the currently open
+    /// chat, because the sidebar action has to work for spaces that were never
+    /// opened this session.
+    func markSpaceAsUnread(_ spaceId: String) async {
+        guard let service = chatService else { return }
+
+        let page: MessagePage
+        do {
+            page = try await service.fetchMessages(spaceId: spaceId, pageSize: 20)
+        } catch {
+            print("❌ markSpaceAsUnread: cannot read \(spaceId): \(error)")
+            return
+        }
+
+        guard let newestIncoming = page.messages.first(where: { !$0.isFromMe }) else { return }
+        let mark = newestIncoming.timestamp.addingTimeInterval(-1)
+
+        saveLastReadTimestamp(for: spaceId, date: mark)
+        if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
+            spaces[index].lastReadTimestamp = mark
+            spaces[index].unreadCount = page.messages.filter { !$0.isFromMe && $0.timestamp > mark }.count
+        }
+        updateDockBadge()
+        await pushSpaceReadState(spaceId: spaceId, lastRead: mark)
+    }
+
+    /// Best-effort copy of a read position to Google Chat. The scope consent
+    /// dialog may appear the first time; a refusal only means the official
+    /// clients will not mirror us, so it is never surfaced as an error.
+    private func pushSpaceReadState(spaceId: String, lastRead: Date) async {
+        guard let service = chatService, let authManager else { return }
+
+        guard await authManager.ensureReadStateScopeIfNeeded() else {
+            print("⚠️ chat.users.readstate unavailable — read state kept local only for \(spaceId)")
+            return
+        }
+
+        do {
+            try await service.updateSpaceReadState(spaceId: spaceId, lastReadTime: lastRead)
+            print("✅ read state pushed: \(spaceId) @ \(lastRead)")
+        } catch {
+            print("❌ updateSpaceReadState failed for \(spaceId): \(error)")
+        }
     }
     
     /// Sends the current message and forces a final UI refresh for the scroll view.

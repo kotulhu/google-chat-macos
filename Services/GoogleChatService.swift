@@ -173,7 +173,42 @@ class GoogleChatService {
         }
         return ChatSpace(id: created.name, name: created.displayName ?? L.str("space.unnamed"), type: type, lastMessage: nil)
     }
-    
+
+    /// RFC3339 formatter for the read-state API, which takes `lastReadTime` as
+    /// a string rather than a Google timestamp.
+    private static let readStateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    /// Moves the caller's read position inside a space, which is how the
+    /// official clients decide whether it counts as read.
+    ///
+    /// `PATCH users/me/spaces/{space}/spaceReadState?updateMask=lastReadTime`.
+    /// Passing a time at or past the newest message marks the space read;
+    /// passing one before it marks it unread. Replies in threads are governed by
+    /// the separate thread read state and are not affected.
+    ///
+    /// Requires the `chat.users.readstate` scope — see
+    /// `GoogleAuthManager.ensureReadStateScopeIfNeeded()`.
+    func updateSpaceReadState(spaceId: String, lastReadTime: Date) async throws {
+        var components = URLComponents(string: baseURL + "users/me/" + spaceId + "/spaceReadState")!
+        components.queryItems = [URLQueryItem(name: "updateMask", value: "lastReadTime")]
+
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: ["lastReadTime": Self.readStateFormatter.string(from: lastReadTime)]
+        )
+
+        PerfBeacon.start("Net", phase: "updateSpaceReadState:network")
+        let (data, response) = try await authorizedData(for: request)
+        PerfBeacon.end("Net", phase: "updateSpaceReadState:network", detail: "bytes=\(data.count)")
+        try validateHTTPResponse(response, data: data, domain: "GoogleChatSpaceReadState")
+    }
+
     /// Fetches a page of messages (newest first).  Passing the `pageToken` returned
     /// by the previous call continues to older messages, so a feed can be
     /// progressively loaded backwards.

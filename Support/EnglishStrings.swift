@@ -55,6 +55,8 @@ public enum EnglishStrings {
         // Chat list
         "space.pin": "Pin to top",
         "space.unpin": "Unpin",
+        "space.markRead": "Mark as read",
+        "space.markUnread": "Mark as unread",
 
         // About
         "version.format": "Version %@ (build %@)",

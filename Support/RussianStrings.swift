@@ -56,6 +56,8 @@ public enum RussianStrings {
         // Список чатов
         "space.pin": "Закрепить сверху",
         "space.unpin": "Открепить",
+        "space.markRead": "Прочитать",
+        "space.markUnread": "Отметить непрочитанным",
 
         // About
         "version.format": "Версия %@ (сборка %@)",

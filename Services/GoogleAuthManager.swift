@@ -84,7 +84,8 @@ class GoogleAuthManager: ObservableObject {
             "https://www.googleapis.com/auth/chat.memberships",
             "https://www.googleapis.com/auth/chat.messages.reactions",
             "https://www.googleapis.com/auth/chat.customemojis",
-            "https://www.googleapis.com/auth/directory.readonly"
+            "https://www.googleapis.com/auth/directory.readonly",
+            "https://www.googleapis.com/auth/chat.users.readstate"
         ]
         
         GIDSignIn.sharedInstance.signIn(
@@ -144,68 +145,63 @@ class GoogleAuthManager: ObservableObject {
         }
     }
 
-    /// Ensures the `directory.readonly` scope is granted.  If the current
-    /// session does not contain it (e.g. an older token), presents the
-    /// incremental-consent dialog.  Returns `true` when the scope is available.
-    func ensureDirectoryScopeIfNeeded() async -> Bool {
-        let scope = "https://www.googleapis.com/auth/directory.readonly"
-
+    /// Ensures a single scope is granted on top of whatever the current session
+    /// already has. When it is missing (an older token, or a scope added after
+    /// sign-in) this presents the incremental-consent dialog, so callers must be
+    /// prepared to run on the main actor with a window available.
+    /// Returns `true` when the scope is usable.
+    ///
+    /// `label` is only used for the log line, so it should read like the scope
+    /// itself (`directory.readonly`, `chat.users.readstate`, …).
+    private func ensureScopeIfNeeded(_ scope: String, label: String) async -> Bool {
         if let granted = GIDSignIn.sharedInstance.currentUser?.grantedScopes,
            granted.contains(scope) {
-            print("✅ directory.readonly scope already granted")
+            print("✅ \(label) scope already granted")
             return true
         }
 
         guard let user = GIDSignIn.sharedInstance.currentUser,
               let window = NSApplication.shared.windows.first else {
-            print("⚠️ ensureDirectoryScope: no user or window")
+            print("⚠️ ensureScopeIfNeeded(\(label)): no user or window")
             return false
         }
 
         return await withCheckedContinuation { continuation in
             user.addScopes([scope], presenting: window) { _, error in
                 if let error = error {
-                    print("⚠️ addScopes failed: \(error.localizedDescription)")
+                    print("⚠️ addScopes(\(label)) failed: \(error.localizedDescription)")
                     continuation.resume(returning: false)
                     return
                 }
                 let granted = user.grantedScopes?.contains(scope) ?? false
-                print(granted ? "✅ directory.readonly scope granted" : "⚠️ scope still missing after consent")
+                print(granted ? "✅ \(label) scope granted" : "⚠️ \(label) scope still missing after consent")
                 continuation.resume(returning: granted)
             }
         }
+    }
+
+    /// Ensures the `directory.readonly` scope is granted.  If the current
+    /// session does not contain it (e.g. an older token), presents the
+    /// incremental-consent dialog.  Returns `true` when the scope is available.
+    func ensureDirectoryScopeIfNeeded() async -> Bool {
+        await ensureScopeIfNeeded("https://www.googleapis.com/auth/directory.readonly",
+                                  label: "directory.readonly")
     }
 
     /// Ensures the `chat.customemojis` scope is granted.  If the current
     /// session does not contain it, presents the incremental-consent dialog.
     /// Returns `true` when the scope is available.
     func ensureCustomEmojiScopeIfNeeded() async -> Bool {
-        let scope = "https://www.googleapis.com/auth/chat.customemojis"
+        await ensureScopeIfNeeded("https://www.googleapis.com/auth/chat.customemojis",
+                                  label: "chat.customemojis")
+    }
 
-        if let granted = GIDSignIn.sharedInstance.currentUser?.grantedScopes,
-           granted.contains(scope) {
-            print("✅ chat.customemojis scope already granted")
-            return true
-        }
-
-        guard let user = GIDSignIn.sharedInstance.currentUser,
-              let window = NSApplication.shared.windows.first else {
-            print("⚠️ ensureCustomEmojiScope: no user or window")
-            return false
-        }
-
-        return await withCheckedContinuation { continuation in
-            user.addScopes([scope], presenting: window) { _, error in
-                if let error = error {
-                    print("⚠️ addScopes failed: \(error.localizedDescription)")
-                    continuation.resume(returning: false)
-                    return
-                }
-                let granted = user.grantedScopes?.contains(scope) ?? false
-                print(granted ? "✅ chat.customemojis scope granted" : "⚠️ scope still missing after consent")
-                continuation.resume(returning: granted)
-            }
-        }
+    /// Ensures the `chat.users.readstate` scope is granted, which is what the
+    /// official clients need to agree with us about read/unread. Returns `false`
+    /// when it is unavailable, in which case callers keep the state local only.
+    func ensureReadStateScopeIfNeeded() async -> Bool {
+        await ensureScopeIfNeeded("https://www.googleapis.com/auth/chat.users.readstate",
+                                  label: "chat.users.readstate")
     }
 
     /// Decides whether the interactive OAuth flow is needed at all:
