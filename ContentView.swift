@@ -318,35 +318,18 @@ struct ContentView: View {
 /// The detail pane for a single chat: message list, attachment strip,
 /// mention autocomplete and the message input bar.
 struct ChatDetailView: View {
+    /// Id of the zero-height marker that closes the feed. Scrolling targets it
+    /// instead of a message row: rows are recycled and re-measured while images
+    /// and reactions stream in, so pinning one of them is what made the feed
+    /// jerk. The marker itself never moves.
+    private static let feedBottomID = "feed-bottom"
+
     let space: ChatSpace
     @ObservedObject var chatVM: ChatViewModel
     @ObservedObject var scheduledStore: ScheduledMessageStore
     @State private var newMessageText = ""
     @State private var selectedFiles: [URL] = []
     @State private var scrollProxy: ScrollViewProxy?
-    @State private var didInitialScroll = false
-    @State private var initialScrollTarget: (id: String, anchor: UnitPoint)?
-    @State private var stabilizeToken = 0
-    /// Id of the message currently pinned to the feed's anchor edge. Bound to
-    /// `scrollPosition` so SwiftUI re-places it whenever the content above it
-    /// changes height (images finishing their download, older pages arriving).
-    @State private var visibleMessageId: String?
-    /// Latched as soon as the reader leaves the initial anchor. Afterwards the
-    /// feed is never forced back, and the pinned id alone keeps the view steady.
-    @State private var userMovedFromInitialAnchor = false
-    /// Set once `scrollPosition` has actually reported the initial target, i.e.
-    /// the feed really did land on the newest message. Until then a pinned id
-    /// that differs from the target is a failed placement rather than the
-    /// reader scrolling away, and must not release the anchor.
-    @State private var initialAnchorReached = false
-    /// Upper bound on the "still hunting for the anchor" phase. Without it a
-    /// placement that can never succeed would keep yanking the feed down.
-    @State private var anchorRetryDeadline: Date?
-    /// Supersedes a pending "did the reader really scroll away?" check.
-    @State private var awayCheckToken = 0
-    /// While the initial placement burst is still running, any anchor movement
-    /// is assumed to be programmatic rather than a reader scroll.
-    @State private var ignoreScrollDetectionUntil: Date?
     @State private var mentionQuery: String?
     @State private var inputHeight: CGFloat = 36
     @State private var isShowingMembers = false
@@ -501,29 +484,20 @@ struct ChatDetailView: View {
                         }
                         .id(message.id)
                     }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.feedBottomID)
                 }
-                .scrollTargetLayout()
                 .padding()
             }
-            .scrollPosition(id: $visibleMessageId, anchor: .bottom)
-            .onAppear {
-                scrollProxy = proxy
-                scrollToInitialMessage(using: proxy)
-            }
+            // Opening a chat lands on the newest message, and the feed keeps
+            // following the end while messages arrive — without ever pinning a
+            // particular row, which is what made the list jump while the reader
+            // was scrolling.
+            .defaultScrollAnchor(.bottom)
+            .onAppear { scrollProxy = proxy }
             .onChange(of: chatVM.conversationMessages) { _ in
                 PerfBeacon.mark("Render", phase: "messagesChanged", detail: "count=\(chatVM.messages.count)")
-                if didInitialScroll {
-                    // The feed can be replaced wholesale (network response after
-                    // the cache, or a poll tick). Re-assert the anchor while the
-                    // layout is still settling instead of letting the lazy stack
-                    // fall back to offset 0 (the oldest message).
-                    stabilizeInitialScroll(using: proxy)
-                } else {
-                    scrollToInitialMessage(using: proxy)
-                }
-            }
-            .onChange(of: visibleMessageId) { _, newValue in
-                noteReaderMovedAwayFromAnchor(newValue)
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -693,37 +667,12 @@ struct ChatDetailView: View {
         .help(L.str("jump.unread.hint"))
     }
 
-    /// Scrolls the message list to its newest top-level message.
+    /// Scrolls the message list to the end of the feed.
     ///
     /// Deliberately unanimated: the reader pressed a "go to the end" button and
-    /// expects to be there at once. Animating also overlaps the window in which
-    /// image and reaction updates re-schedule `stabilizeInitialScroll` back to
-    /// the initial anchor, which showed up as the feed fighting itself.
+    /// expects to be there at once.
     private func scrollToNewestMessage() {
-        guard let target = chatVM.newestMessageTarget() else { return }
-        if target.id != initialScrollTarget?.id {
-            takeFeedOwnership()
-        }
-        scrollProxy?.scrollTo(target.id, anchor: target.anchor)
-    }
-
-    /// Hands the feed back to the reader after an explicit jump by cancelling
-    /// every remaining forced re-anchor.
-    ///
-    /// The rows the jump reveals load their reactions and images, and each of
-    /// those updates mutates `conversationMessages`, which re-schedules the
-    /// whole `stabilizeInitialScroll` burst back towards the initial anchor right
-    /// after the jump landed. The two scroll to different ids and the feed is
-    /// yanked back and forth.
-    /// Latching the flag also stops `reassertAnchorIfStillParked`, which would
-    /// otherwise keep pulling the same way, and clears the detection grace period
-    /// so the jump itself counts as reader movement rather than being mistaken
-    /// for a programmatic one.
-    private func takeFeedOwnership() {
-        userMovedFromInitialAnchor = true
-        stabilizeToken &+= 1
-        awayCheckToken &+= 1
-        ignoreScrollDetectionUntil = nil
+        scrollProxy?.scrollTo(Self.feedBottomID, anchor: .bottom)
     }
 
     /// Avatar URLs from the space's membership list, keyed by `users/...` id.
@@ -749,9 +698,6 @@ struct ChatDetailView: View {
                 Task { await chatVM.openDirectChat(with: userId) }
             },
             mentionDisplayNames: mentionDisplayNames,
-            onAttachmentLayoutChanged: {
-                reassertAnchorIfStillParked(using: proxy)
-            },
             onViewportVisible: { messageId in
                 chatVM.markReactionViewportVisible(id: messageId)
             },
@@ -1143,123 +1089,9 @@ if scheduleSendLater, chatVM.threadReplyTarget == nil {
             selectedFiles = []
             quotedDraft = nil
             
-            if let firstId = chatVM.conversationMessages.first?.id {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    withAnimation {
-                        scrollProxy?.scrollTo(firstId, anchor: .bottom)
-                    }
-                }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                scrollProxy?.scrollTo(Self.feedBottomID, anchor: .bottom)
             }
-        }
-    }
-    
-    /// Performs the one-time initial scroll for the current space, which always
-    /// targets the newest message. A burst of re-asserts follows so a layout
-    /// that is still settling (the network page replacing the cache, the first
-    /// images decoding) cannot leave the list parked at the top of the feed.
-    private func scrollToInitialMessage(using proxy: ScrollViewProxy) {
-        guard !didInitialScroll, let target = chatVM.initialScrollTarget(for: space.id) else {
-            return
-        }
-        
-        initialScrollTarget = target
-        initialAnchorReached = false
-        anchorRetryDeadline = Date().addingTimeInterval(20)
-        // The re-assert burst below fires up to 2.5s from now; anchor movement
-        // inside that window is ours, not the reader's.
-        ignoreScrollDetectionUntil = Date().addingTimeInterval(1.8)
-        // Seed the pin with the same anchor the scroll uses, so `scrollPosition`
-        // already holds this message while the first images decode.
-        visibleMessageId = target.id
-        didInitialScroll = true
-        PerfBeacon.mark("Render", phase: "initialScroll", detail: "id=\(target.id.suffix(12))")
-        stabilizeInitialScroll(using: proxy)
-    }
-
-    /// Re-applies the feed anchor — always the newest top-level message — each
-    /// time the list changes, so an unparked reader follows the end of the
-    /// conversation instead of whatever row the layout settled on. Each call
-    /// supersedes the previous one via `stabilizeToken`, so stale anchors never
-    /// fire, and everything stops the moment the reader scrolls away.
-    private func stabilizeInitialScroll(using proxy: ScrollViewProxy) {
-        guard !userMovedFromInitialAnchor,
-              let target = chatVM.initialScrollTarget(for: space.id) else {
-            return
-        }
-        
-        initialScrollTarget = target
-        stabilizeToken &+= 1
-        let token = stabilizeToken
-        let delays: [TimeInterval] = [0, 0.05, 0.12, 0.25, 0.5, 0.9, 1.5, 2.5]
-        for delay in delays {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard token == stabilizeToken, !userMovedFromInitialAnchor else { return }
-                proxy.scrollTo(target.id, anchor: target.anchor)
-            }
-        }
-    }
-
-    /// Cheap single re-assert used when an attachment finishes loading. While
-    /// the reader is still parked this keeps them on the newest message; after
-    /// they scroll, the `scrollPosition` pin handles the reflow instead.
-    private func reassertAnchorIfStillParked(using proxy: ScrollViewProxy) {
-        guard !userMovedFromInitialAnchor,
-              let target = chatVM.initialScrollTarget(for: space.id) else {
-            return
-        }
-        initialScrollTarget = target
-        proxy.scrollTo(target.id, anchor: target.anchor)
-    }
-
-    /// Records that the feed landed on its anchor, and releases the anchor once
-    /// the reader has genuinely navigated away from the newest message.
-    ///
-    /// A pinned id that differs from the newest message is not trusted as a
-    /// reader scroll until the anchor has been reached: before that the same
-    /// signature means the placement simply failed, and releasing it there would
-    /// cancel every further attempt and leave the list at the top for good.
-    /// `anchorRetryDeadline` bounds that phase so a placement that can never
-    /// succeed does not keep yanking the feed down either.
-    ///
-    /// After the anchor has been reached the release is debounced: a freshly
-    /// arrived message changes the newest id before our own re-pin lands, and
-    /// releasing on that transient would stop the feed from following new
-    /// messages while the reader is still sitting at the bottom.
-    private func noteReaderMovedAwayFromAnchor(_ id: String?) {
-        guard !userMovedFromInitialAnchor, let id,
-              let newest = chatVM.conversationMessages.first?.id else { return }
-        PerfBeacon.mark("Render", phase: "visibleId", detail: "id=\(id.suffix(12)) newest=\(newest.suffix(12))")
-
-        if id == newest {
-            if !initialAnchorReached {
-                initialAnchorReached = true
-                anchorRetryDeadline = nil
-                PerfBeacon.mark("Render", phase: "anchorReached", detail: "id=\(id.suffix(12))")
-            }
-            return
-        }
-
-        if !initialAnchorReached {
-            if let deadline = anchorRetryDeadline, Date() > deadline {
-                userMovedFromInitialAnchor = true
-                PerfBeacon.mark("Render", phase: "feedAnchorReleased", detail: "retry-expired \(id.suffix(12))")
-            }
-            return
-        }
-
-        if let ignoreUntil = ignoreScrollDetectionUntil, Date() <= ignoreUntil {
-            return
-        }
-
-        awayCheckToken &+= 1
-        let token = awayCheckToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            guard token == awayCheckToken,
-                  !userMovedFromInitialAnchor,
-                  let current = chatVM.conversationMessages.first?.id,
-                  visibleMessageId != current else { return }
-            userMovedFromInitialAnchor = true
-            PerfBeacon.mark("Render", phase: "feedAnchorReleased", detail: "id=\(visibleMessageId?.suffix(12) ?? "-")")
         }
     }
     

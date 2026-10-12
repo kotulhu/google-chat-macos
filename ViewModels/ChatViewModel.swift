@@ -1555,29 +1555,6 @@ class ChatViewModel: NSObject,ObservableObject {
         loadingThreadNames.removeAll()
     }
 
-    /// Chooses where the message list is placed when a chat opens: always the
-    /// newest top-level message, so every chat starts at the end of the
-    /// conversation rather than resuming at the read mark.
-    ///
-    /// Only the top-level conversation is considered — anchoring to a thread
-    /// reply would land the reader on a row that is nested and possibly
-    /// collapsed. Returns nil while the feed is still empty, which keeps the
-    /// initial scroll pending until the first page arrives.
-    func initialScrollTarget(for spaceId: String) -> (id: String, anchor: UnitPoint)? {
-        conversationMessages.first.map { ($0.id, .bottom) }
-    }
-
-    /// Target for the floating scroll button: the newest top-level message, so the
-    /// button simply takes the reader to the bottom of the feed.
-    ///
-    /// Deliberately not the newest *unread* message: that id sits in the middle
-    /// of the list, and pinning a mid-list row to the `.bottom` anchor makes
-    /// SwiftUI keep re-placing it as the rows below it materialise — which is
-    /// what made the feed jerk. The bottom of the list has no such ambiguity.
-    func newestMessageTarget() -> (id: String, anchor: UnitPoint)? {
-        conversationMessages.first.map { ($0.id, .bottom) }
-    }
-
     /// The current unread badge count for a space (drives the jump-to-unread button).
     func unreadCount(for spaceId: String) -> Int {
         spaces.first(where: { $0.id == spaceId })?.unreadCount ?? 0

@@ -7,7 +7,6 @@ struct MessageBubbleView: View {
     let accessToken: String
     var onSenderTap: ((String) -> Void)? = nil
     var mentionDisplayNames: [String: String] = [:]
-    var onAttachmentLayoutChanged: (() -> Void)? = nil
     var onViewportVisible: ((String) -> Void)? = nil
     var onViewportHidden: ((String) -> Void)? = nil
     var onToggleReaction: ((String, String) async -> Void)? = nil
@@ -88,8 +87,7 @@ if let quoted = message.quotedMessage {
                         ForEach(message.attachments) { attachment in
                             AttachmentRow(
                                 attachment: attachment,
-                                accessToken: accessToken,
-                                onLayoutChanged: onAttachmentLayoutChanged
+                                accessToken: accessToken
                             )
                         }
                     }
@@ -264,9 +262,16 @@ if let quoted = message.quotedMessage {
 struct AttachmentRow: View {
     let attachment: Attachment
     let accessToken: String
-    var onLayoutChanged: (() -> Void)? = nil
     @State private var imageData: Data?
     @State private var isLoading = true
+    /// Set while the row is inside the viewport. Nothing is downloaded before
+    /// that, so a fast scroll through a long feed does not start fetches for
+    /// pictures the reader never stopped on.
+    @State private var isInViewport = false
+    /// Whether `reservedAspectRatio` came from the header probe. When it did it
+    /// is authoritative, and the decoded image must not be allowed to change
+    /// the row height a second time.
+    @State private var wasReservedFromProbe = false
     @State private var fileSize: Int64 = 0
     /// Aspect ratio the image slot is laid out with. Reserved from the known or
     /// probed pixel size *before* the bytes arrive, so the row occupies the same
@@ -274,6 +279,8 @@ struct AttachmentRow: View {
     @State private var reservedAspectRatio: CGFloat = ImageDimensions.fallbackAspectRatio
 
     private static let maxImageHeight: CGFloat = 500
+    /// Grace period between a row becoming visible and its download starting.
+    private static let imageLoadDelay: TimeInterval = 0.25
     /// Height of the download button, reserved while the image is still loading
     /// so the row does not grow when the real content replaces the spinner.
     private static let downloadButtonHeight: CGFloat = 16
@@ -283,11 +290,35 @@ struct AttachmentRow: View {
     private static var sizeCache: [String: Int64] = [:]
     
     var body: some View {
+        content
+            // Nothing is fetched before the row is actually on screen, and then
+            // only after a short beat: rows are built a little before they
+            // scroll into view, and flicking through a long feed should not
+            // start downloads for pictures the reader never stopped on. Leaving
+            // the viewport cancels the pending work through `task(id:)`.
+            .onAppear { isInViewport = true }
+            .onDisappear { isInViewport = false }
+            .task(id: isInViewport) {
+                guard isInViewport, attachment.isImage else { return }
+                // Cached bytes cost nothing to show, so they skip the delay.
+                if ImageCache.shared.get(forKey: imageCacheKey) == nil {
+                    try? await Task.sleep(for: .seconds(Self.imageLoadDelay))
+                    guard !Task.isCancelled else { return }
+                }
+                // The slot height is settled before the bytes are requested, so
+                // the picture cannot reflow the feed when it arrives.
+                await resolveDimensions()
+                guard !Task.isCancelled else { return }
+                await loadImage()
+            }
+    }
+
+    private var content: some View {
         Group {
             if attachment.isImage {
                 if let imageData, let nsImage = NSImage(data: imageData) {
                     VStack(alignment: .leading, spacing: 4) {
-                        imageSlot(aspectRatio: imageAspectRatio(nsImage)) {
+                        imageSlot(aspectRatio: reservedAspectRatio) {
                             Image(nsImage: nsImage)
                                 .resizable()
                         }
@@ -315,12 +346,6 @@ struct AttachmentRow: View {
                     .padding(8)
                     .background(Color.gray.opacity(0.1))
                     .cornerRadius(8)
-                    .task {
-                        await loadImage()
-                    }
-                    .task {
-                        await resolveDimensions()
-                    }
                 } else {
                     // Keeps the reserved slot height: a failed download must not
                     // collapse the row, otherwise an offline burst of failures
@@ -381,11 +406,16 @@ struct AttachmentRow: View {
             .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    /// Aspect ratio of a decoded image, or the reserved one when it is degenerate.
-    private func imageAspectRatio(_ image: NSImage) -> CGFloat {
+    /// Falls back to the decoded image's own ratio only when the header probe
+    /// never answered. When it did, `reservedAspectRatio` is what the row was
+    /// laid out with before the bytes were requested and must stand, otherwise
+    /// the very picture we reserved room for would still move everything below
+    /// it when it lands.
+    private func adoptAspectRatioIfProbeMissed(_ image: NSImage) {
+        guard !wasReservedFromProbe else { return }
         let size = image.size
-        guard size.width > 0, size.height > 0 else { return reservedAspectRatio }
-        return size.width / size.height
+        guard size.width > 0, size.height > 0 else { return }
+        reservedAspectRatio = size.width / size.height
     }
 
     /// Asks the server for just the first bytes of the image so the slot can be
@@ -396,6 +426,7 @@ struct AttachmentRow: View {
         if let cached = ImageDimensions.shared.cachedSize(forKey: key) {
             await MainActor.run {
                 self.reservedAspectRatio = cached.width / cached.height
+                self.wasReservedFromProbe = true
             }
             return
         }
@@ -406,6 +437,7 @@ struct AttachmentRow: View {
         guard !Task.isCancelled, let measured else { return }
         await MainActor.run {
             self.reservedAspectRatio = measured.width / measured.height
+            self.wasReservedFromProbe = true
         }
     }
 
@@ -441,14 +473,13 @@ struct AttachmentRow: View {
             if let nsImage = NSImage(data: cachedData) {
                 rememberDimensions(of: nsImage, forKey: cacheKey)
                 await MainActor.run {
+                    adoptAspectRatioIfProbeMissed(nsImage)
                     self.imageData = cachedData
                     self.isLoading = false
-                    self.onLayoutChanged?()
                 }
             } else {
                 await MainActor.run {
                     self.isLoading = false
-                    self.onLayoutChanged?()
                 }
             }
             return
@@ -466,14 +497,13 @@ struct AttachmentRow: View {
             if let nsImage = NSImage(data: data) {
                 rememberDimensions(of: nsImage, forKey: cacheKey)
                 await MainActor.run {
+                    adoptAspectRatioIfProbeMissed(nsImage)
                     self.imageData = data
                     self.isLoading = false
-                    self.onLayoutChanged?()
                 }
             } else {
                 await MainActor.run {
                     self.isLoading = false
-                    self.onLayoutChanged?()
                 }
             }
         } catch {
@@ -482,7 +512,6 @@ struct AttachmentRow: View {
             print("❌ Failed to load image: \(error)")
             await MainActor.run {
                 self.isLoading = false
-                self.onLayoutChanged?()
             }
         }
     }
