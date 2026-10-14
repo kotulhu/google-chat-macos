@@ -136,7 +136,6 @@ struct ContentView: View {
                         isAuthenticating = false
                         if success {
                             print("✅ Sign in succeeded")
-                            self.chatVM.startBackgroundCheck()
                             self.chatVM.sendWelcomeNotification()
                             self.chatVM.configure(with: self.authManager.accessToken, authManager: self.authManager)
                             self.chatVM.startTokenRefreshTimer(authManager: self.authManager)
@@ -256,7 +255,6 @@ struct ContentView: View {
                             authManager.signOut()
                             chatVM.clearData()
                             chatVM.stopTokenRefreshTimer()
-                            chatVM.stopBackgroundCheck()
                         }
                         .font(.caption)
                     }

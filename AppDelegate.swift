@@ -54,12 +54,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: UNUserNotificationCenterDelegate {
     /// Decides how a notification is presented while the app is in the
-    /// foreground: banner, sound and badge are all shown.
+    /// foreground: banner and sound. The red dock dot is not part of this — it
+    /// is driven exclusively by `NSApp.dockTile.badgeLabel` in the view model,
+    /// so there is a single owner for the badge.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         let content = notification.request.content
         print("🔔 willPresent: title=\"\(content.title)\" body=\"\(content.body.prefix(60))\" sound=\(content.sound != nil)")
         
-        completionHandler([.alert, .sound, .badge])
+        completionHandler([.alert, .sound])
     }
 
     /// Handles a click on a delivered notification: restores the window to the

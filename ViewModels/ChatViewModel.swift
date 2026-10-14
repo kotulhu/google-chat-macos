@@ -48,11 +48,12 @@ class ChatViewModel: NSObject,ObservableObject {
     private var messagesPageToken: String?
     
     private var sentNotificationIds = Set<String>()
-    
-    private var backgroundCheckTimer: Timer?
-    /// In-flight background scan. Held so a new timer tick can cancel the
-    /// previous sweep instead of letting scans overlap on slow connections.
-    private var backgroundCheckTask: Task<Void, Never>?
+
+    /// Newest incoming message timestamp already observed per space this
+    /// session. The first sighting only seeds the mark, so history that was
+    /// already unread cannot spray popups; from then on a message newer than
+    /// the mark is an arrival and pops exactly once.
+    private var lastKnownIncoming: [String: Date] = [:]
     
     private var spacesRefreshTimer: Timer?
     
@@ -202,7 +203,7 @@ class ChatViewModel: NSObject,ObservableObject {
             }
         }
         reactionViewportController.start()
-        print("🔄 [Poll] startPolling for: \(space.name), backgroundCheckTimer=\(backgroundCheckTimer != nil ? "running" : "NOT running")")
+        print("🔄 [Poll] startPolling for: \(space.name)")
     }
 
     /// Stops the current space poll and reaction viewport tracking.
@@ -244,6 +245,7 @@ class ChatViewModel: NSObject,ObservableObject {
         print("🔧 ChatViewModel configured")
         
         sentNotificationIds.removeAll()
+        lastKnownIncoming.removeAll()
         print("🧹 sentNotificationIds cleared")
         Task {
             await setCurrentUserId()
@@ -277,7 +279,6 @@ class ChatViewModel: NSObject,ObservableObject {
             self.spaces = fetchedSpaces
             applyPinState()
             sortSpaces()
-            startBackgroundCheck()
             startSpacesRefresh()
 
             if currentUserId.isEmpty {
@@ -290,12 +291,6 @@ class ChatViewModel: NSObject,ObservableObject {
             
             await refreshUnreadCounts()
 
-            print("🔧 [Diag] spaces=\(spaces.count), bgTimer=\(backgroundCheckTimer != nil ? "YES" : "NO"), service=\(chatService != nil ? "YES" : "NO")")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-                guard let self else { return }
-                print("🔧 [Diag+5s] spaces=\(self.spaces.count), bgTimer=\(self.backgroundCheckTimer != nil ? "YES" : "NO"), selected=\(self.selectedSpace?.name ?? "none")")
-                Task { await self.checkAllSpacesForNewMessages() }
-            }
             if let first = fetchedSpaces.first {
                 self.selectedSpace = first
                 await loadMessages(for: first)
@@ -306,10 +301,11 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
     
-    /// Fetches the newest messages of every space in parallel to update the
-    /// sidebar timestamps, unread badges and the dock badge. This is the single
-    /// authoritative source for `unreadCount` (the background new-message check
-    /// must not mutate it, otherwise the same message gets counted twice).
+    /// Fetches the newest messages of every space in parallel and reconciles
+    /// each one's sidebar timestamp, unread badge, dock badge and popup through
+    /// `syncIncomingState`. This is the only background sweep — it covers every
+    /// space that is not the currently-open chat (that one is handled by the
+    /// 5-second poll in `loadMessages`, which shares the same sink).
     func refreshUnreadCounts() async {
         PerfBeacon.mark("Bg", phase: "refreshUnreadCounts START", detail: "spaces=\(spaces.count)")
         guard let service = chatService else { return }
@@ -327,12 +323,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 }
             }
             for await (spaceId, messages) in group {
-                if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
-                    if let lastMessage = messages.first {
-                        spaces[index].lastMessageTimestamp = lastMessage.timestamp
-                    }
-                    spaces[index].unreadCount = unreadCount(from: messages, spaceId: spaceId)
-                }
+                await syncIncomingState(messages, for: spaceId, notify: true)
             }
         }
         PerfBeacon.end("Bg", phase: "refreshUnreadCounts", detail: "spaces=\(spaces.count)")
@@ -348,6 +339,51 @@ class ChatViewModel: NSObject,ObservableObject {
             return newest.isFromMe ? 0 : 1
         }
         return messages.filter { !$0.isFromMe && $0.timestamp > lastRead }.count
+    }
+
+    /// Reconciles one space's sidebar/dock badge and its popup from a single
+    /// latest-message page.
+    ///
+    /// This is the only place that turns "an incoming message exists" into both
+    /// a red dot and a notification, so the two can never drift apart: the
+    /// badge is always `unreadCount(from:)` for this page, and a popup is
+    /// posted only for a message that arrived after this session started
+    /// watching the space (see `lastKnownIncoming`), deduplicated by timestamp.
+    ///
+    /// `notify` is false while a space is being opened for the first time —
+    /// messages that were already unread before the reader got there must not
+    /// pop a banner, but the badge is still reconciled.
+    private func syncIncomingState(_ messages: [Message], for spaceId: String, notify: Bool) async {
+        guard let index = spaces.firstIndex(where: { $0.id == spaceId }) else { return }
+
+        if let newest = messages.first {
+            spaces[index].lastMessageTimestamp = newest.timestamp
+        }
+        spaces[index].unreadCount = unreadCount(from: messages, spaceId: spaceId)
+        updateDockBadge()
+
+        guard let candidate = messages.first(where: { !$0.isFromMe }) else { return }
+
+        // First sighting of this space only records the high-water mark; the
+        // badge above already reflects pre-existing unread, but nothing pops
+        // for messages that arrived before this session started watching.
+        guard let previous = lastKnownIncoming[spaceId] else {
+            lastKnownIncoming[spaceId] = candidate.timestamp
+            return
+        }
+        guard candidate.timestamp > previous else { return }
+        lastKnownIncoming[spaceId] = candidate.timestamp
+
+        // A first open of a space suppresses the popup (the messages were
+        // already unread before the reader got there) while keeping the mark.
+        guard notify else { return }
+
+        let dedupId = "\(spaceId)_\(candidate.timestamp.timeIntervalSince1970)"
+        guard !sentNotificationIds.contains(dedupId) else { return }
+        sentNotificationIds.insert(dedupId)
+
+        let resolved = await messageWithResolvedAuthor(candidate)
+        sendNotification(for: resolved, in: spaces[index])
     }
     
     /// Starts the 30-second unread-count background refresh.
@@ -422,22 +458,18 @@ class ChatViewModel: NSObject,ObservableObject {
             PerfBeacon.end("Lenta", phase: "buildNames", detail: "count=\(messagesWithNames.count)")
             let changed = self.messages != messagesWithNames
 
-            // Detect new incoming messages and fire a popup immediately so the
-            // currently-open chat also shows notifications (the 60-second
-            // background check only covers non-selected spaces).
-            if changed && lastLoadedSpaceId == space.id {
-                let previousIds = Set(self.messages.map { $0.id })
-                // `messagesWithNames` is newest-first, so the first new item is
-                // the newest of the newly arrived batch — that is what should
-                // appear in the notification.
-                if let newestIncoming = messagesWithNames.first(where: { !$0.isFromMe && !previousIds.contains($0.id) }) {
-                    let dedupId = "\(space.id)_\(newestIncoming.timestamp.timeIntervalSince1970)"
-                    if !sentNotificationIds.contains(dedupId) {
-                        sentNotificationIds.insert(dedupId)
-                        let notificationMessage = await messageWithResolvedAuthor(newestIncoming)
-                        sendNotification(for: notificationMessage, in: space)
-                    }
-                }
+            // The open chat reacts to new arrivals immediately; the 30-second
+            // background refresh covers everything else. Both go through the
+            // same sink, so the popup and the badge always agree. A first load
+            // reconciles the badge without popping (the messages were already
+            // unread before the reader arrived).
+            let previousTimestamp = spaces.first(where: { $0.id == space.id })?.lastMessageTimestamp
+            await syncIncomingState(messagesWithNames, for: space.id,
+                                    notify: changed && lastLoadedSpaceId == space.id)
+            if let idx = spaces.firstIndex(where: { $0.id == space.id }),
+               let now = spaces[idx].lastMessageTimestamp,
+               now > (previousTimestamp ?? .distantPast) {
+                sortSpaces()
             }
             let previousSpaceId = lastLoadedSpaceId
             lastLoadedSpaceId = space.id
@@ -455,18 +487,6 @@ class ChatViewModel: NSObject,ObservableObject {
             PerfBeacon.start("Lenta", phase: "cacheWrite")
             MessageCache.shared.set(messagesWithNames, forSpaceId: space.id)
             PerfBeacon.end("Lenta", phase: "cacheWrite", detail: "count=\(messagesWithNames.count)")
-            
-            if let latestMsg = messagesWithNames.last,
-               let idx = spaces.firstIndex(where: { $0.id == space.id }) {
-                let old = spaces[idx].lastMessageTimestamp
-                let hasNewer = latestMsg.timestamp > (old ?? .distantPast)
-                if old == nil || hasNewer {
-                    spaces[idx].lastMessageTimestamp = latestMsg.timestamp
-                    if hasNewer {
-                        sortSpaces()
-                    }
-                }
-            }
             
         } catch {
             if cachedMessages?.isEmpty != false {
@@ -573,9 +593,10 @@ class ChatViewModel: NSObject,ObservableObject {
         errorMessage = nil
         isLoading = false
         sentNotificationIds.removeAll()
+        lastKnownIncoming.removeAll()
         stopPolling()
         stopTokenRefreshTimer()
-        stopBackgroundCheck()
+        stopBackgroundRefresh()
         stopSpacesRefresh()
         scheduledMessagesService.stop()
         directChatUserMapping.removeAll()
@@ -1573,10 +1594,7 @@ class ChatViewModel: NSObject,ObservableObject {
         
         if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
             spaces[index].lastReadTimestamp = message.timestamp
-            let hasUnreadAfterVisibleMessage = messages.contains {
-                !$0.isFromMe && $0.timestamp > message.timestamp
-            }
-            spaces[index].unreadCount = hasUnreadAfterVisibleMessage ? 1 : 0
+            spaces[index].unreadCount = unreadCount(from: messages, spaceId: spaceId)
         }
         updateDockBadge()
     }
@@ -1685,91 +1703,6 @@ class ChatViewModel: NSObject,ObservableObject {
         print("🔔 [Notify] openSpace: \(space.name)")
     }
 
-    /// Scans every non-selected space for newer incoming messages, sends a
-    /// notification (deduplicated) per the latest one and bumps unread counts.
-    func checkAllSpacesForNewMessages() async {
-        PerfBeacon.mark("Bg", phase: "checkAllSpaces START", detail: "spaces=\(spaces.count)")
-        print("🟢 [Check] START: spaces=\(spaces.count), selected=\(selectedSpace?.name ?? "nil"), dedup=\(sentNotificationIds.count)")
-        guard let service = chatService else {
-            print("🟢 [Check] ABORT: chatService=nil")
-            return
-        }
-        PerfBeacon.start("Bg", phase: "checkAllSpaces")
-        
-        var hasNewMessage = false
-        for space in spaces {
-            // A newer sweep superseded this one (or the app signed out): stop
-            // immediately instead of walking the remaining spaces.
-            if Task.isCancelled {
-                print("🟢 [Check] CANCELLED after \(spaces.count) spaces scanned")
-                return
-            }
-            if selectedSpace?.id == space.id { continue }
-            
-            do {
-                let page = try await service.fetchMessages(spaceId: space.id, pageSize: 1)
-                if Task.isCancelled {
-                    print("🟢 [Check] CANCELLED during fetch of \(space.name)")
-                    return
-                }
-                MessageHistoryStore.shared.upsertMessages(page.history)
-                let latestMessages = page.messages
-                guard let lastMessage = latestMessages.first else { continue }
-                
-                if let idx = spaces.firstIndex(where: { $0.id == space.id }) {
-                    let old = spaces[idx].lastMessageTimestamp
-                    let hasNewer = lastMessage.timestamp > (old ?? .distantPast)
-                    if old == nil || hasNewer {
-                        spaces[idx].lastMessageTimestamp = lastMessage.timestamp
-                    }
-                }
-                
-                guard !lastMessage.isFromMe else { continue }
-                
-                var lastRead = loadLastReadTimestamp(for: space.id)
-                if let readDate = lastRead, readDate.timeIntervalSince1970 < 1000000000 {
-                    lastRead = nil
-                }
-                let actualLastRead: Date
-                if let lr = lastRead {
-                    actualLastRead = lr
-                } else {
-                    actualLastRead = lastMessage.timestamp
-                    saveLastReadTimestamp(for: space.id, date: actualLastRead)
-                }
-
-                let isNew = lastMessage.timestamp > actualLastRead
-                print("🟢 [Check] \(space.name): msg=\(lastMessage.timestamp), lastRead=\(actualLastRead), new=\(isNew), isMe=\(lastMessage.isFromMe)")
-                
-                if isNew {
-                    let messageId = "\(space.id)_\(lastMessage.timestamp.timeIntervalSince1970)"
-                    
-                    if sentNotificationIds.contains(messageId) {
-                        print("🟢 [Check] \(space.name): SKIP (dedup)")
-                    } else {
-                        sentNotificationIds.insert(messageId)
-                        hasNewMessage = true
-                        let notificationMessage = await messageWithResolvedAuthor(lastMessage)
-                        if Task.isCancelled { return }
-                        sendNotification(for: notificationMessage, in: space)
-                        // Bump the dock badge immediately so the red dot
-                        // appears without waiting for the 30-second refresh.
-                        if let idx = spaces.firstIndex(where: { $0.id == space.id }) {
-                            spaces[idx].unreadCount += 1
-                        }
-                        updateDockBadge()
-                        print("🟢 [Check] \(space.name): NOTIFICATION sent, badge updated")
-                    }
-                }
-            } catch {
-                print("🟢 [Check] \(space.name): ERROR \(error.localizedDescription)")
-            }
-        }
-        if hasNewMessage { sortSpaces() }
-        PerfBeacon.end("Bg", phase: "checkAllSpaces", detail: "spaces=\(spaces.count), hasNew=\(hasNewMessage)")
-        print("🟢 [Check] DONE")
-    }
-
     /// Resolves a message's author name before it is used in a notification.
     private func messageWithResolvedAuthor(_ message: Message) async -> Message {
         guard let senderId = message.senderId, !message.isFromMe else {
@@ -1792,30 +1725,6 @@ class ChatViewModel: NSObject,ObservableObject {
         return fallback
     }
     
-    /// Starts the 60-second background check for new incoming messages.
-    func startBackgroundCheck() {
-        backgroundCheckTimer?.invalidate()
-        backgroundCheckTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            print("⏰ [Timer tick] spaces=\(self.spaces.count), service=\(self.chatService != nil ? "OK" : "nil")")
-            // Cancel the previous sweep first: a slow round of per-space
-            // requests must never overlap with the next tick.
-            self.backgroundCheckTask?.cancel()
-            self.backgroundCheckTask = Task { [weak self] in
-                await self?.checkAllSpacesForNewMessages()
-            }
-        }
-        print("⏰ startBackgroundCheck: timer started (60s)")
-    }
-
-    /// Stops the background new-message check.
-    func stopBackgroundCheck() {
-        backgroundCheckTimer?.invalidate()
-        backgroundCheckTimer = nil
-        backgroundCheckTask?.cancel()
-        backgroundCheckTask = nil
-    }
-
     /// Starts the 15-minute refresh of the space list so chats the user is
     /// added to appear without restarting the app.
     func startSpacesRefresh() {
