@@ -334,21 +334,22 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Counts the incoming messages that arrived after the persisted read mark.
     /// Without a read mark yet, a space with an incoming newest message shows 1.
     private func unreadCount(from messages: [Message], spaceId: String) -> Int {
+        let incoming = messages.filter { !$0.isFromMe }
         guard let lastRead = loadLastReadTimestamp(for: spaceId) else {
-            guard let newest = messages.first else { return 0 }
-            return newest.isFromMe ? 0 : 1
+            return incoming.isEmpty ? 0 : 1
         }
-        return messages.filter { !$0.isFromMe && $0.timestamp > lastRead }.count
+        return incoming.filter { $0.timestamp > lastRead }.count
     }
 
     /// Reconciles one space's sidebar/dock badge and its popup from a single
     /// latest-message page.
     ///
     /// This is the only place that turns "an incoming message exists" into both
-    /// a red dot and a notification, so the two can never drift apart: the
-    /// badge is always `unreadCount(from:)` for this page, and a popup is
-    /// posted only for a message that arrived after this session started
-    /// watching the space (see `lastKnownIncoming`), deduplicated by timestamp.
+    /// a red dot and a notification, so the two can never drift apart. The dot
+    /// is the authoritative `unreadCount(from:)`, except that an *arrival* (a
+    /// message newer than the session high-water mark `lastKnownIncoming`) is
+    /// forced to count as unread — otherwise a popup could appear while the
+    /// badge computes zero, which is exactly how the dot went missing.
     ///
     /// `notify` is false while a space is being opened for the first time —
     /// messages that were already unread before the reader got there must not
@@ -359,25 +360,31 @@ class ChatViewModel: NSObject,ObservableObject {
         if let newest = messages.first {
             spaces[index].lastMessageTimestamp = newest.timestamp
         }
-        spaces[index].unreadCount = unreadCount(from: messages, spaceId: spaceId)
+
+        let candidate = messages.first(where: { !$0.isFromMe })
+        let previous = lastKnownIncoming[spaceId]
+        let isArrival: Bool
+        if let candidate, let previous {
+            isArrival = candidate.timestamp > previous
+        } else {
+            isArrival = false
+        }
+
+        // Arriving messages are unread by definition, so the dot can never be
+        // zero while their popup is on screen.
+        var count = unreadCount(from: messages, spaceId: spaceId)
+        if isArrival {
+            count = max(count, 1)
+        }
+        spaces[index].unreadCount = count
+
+        if let candidate {
+            lastKnownIncoming[spaceId] = max(previous ?? .distantPast, candidate.timestamp)
+        }
+
         updateDockBadge()
 
-        guard let candidate = messages.first(where: { !$0.isFromMe }) else { return }
-
-        // First sighting of this space only records the high-water mark; the
-        // badge above already reflects pre-existing unread, but nothing pops
-        // for messages that arrived before this session started watching.
-        guard let previous = lastKnownIncoming[spaceId] else {
-            lastKnownIncoming[spaceId] = candidate.timestamp
-            return
-        }
-        guard candidate.timestamp > previous else { return }
-        lastKnownIncoming[spaceId] = candidate.timestamp
-
-        // A first open of a space suppresses the popup (the messages were
-        // already unread before the reader got there) while keeping the mark.
-        guard notify else { return }
-
+        guard notify, isArrival, let candidate else { return }
         let dedupId = "\(spaceId)_\(candidate.timestamp.timeIntervalSince1970)"
         guard !sentNotificationIds.contains(dedupId) else { return }
         sentNotificationIds.insert(dedupId)
