@@ -372,7 +372,8 @@ class ChatViewModel: NSObject,ObservableObject {
 
         // Arriving messages are unread by definition, so the dot can never be
         // zero while their popup is on screen.
-        var count = unreadCount(from: messages, spaceId: spaceId)
+        let rawCount = unreadCount(from: messages, spaceId: spaceId)
+        var count = rawCount
         if isArrival {
             count = max(count, 1)
         }
@@ -381,6 +382,8 @@ class ChatViewModel: NSObject,ObservableObject {
         if let candidate {
             lastKnownIncoming[spaceId] = max(previous ?? .distantPast, candidate.timestamp)
         }
+
+        print("🟥 [Dot] sync space=\(spaces[index].name) type=\(spaces[index].type) notify=\(notify) isArrival=\(isArrival) raw=\(rawCount) count=\(count) candidateTs=\(candidate?.timestamp.timeIntervalSince1970 ?? -1) prev=\(previous?.timeIntervalSince1970 ?? -1) lastRead=\(loadLastReadTimestamp(for: spaceId)?.timeIntervalSince1970 ?? -1)")
 
         updateDockBadge()
 
@@ -1601,7 +1604,9 @@ class ChatViewModel: NSObject,ObservableObject {
         
         if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
             spaces[index].lastReadTimestamp = message.timestamp
-            spaces[index].unreadCount = unreadCount(from: messages, spaceId: spaceId)
+            let newCount = unreadCount(from: messages, spaceId: spaceId)
+            print("🟩 [Dot] markRead space=\(spaces[index].name) type=\(spaces[index].type) msgTs=\(message.timestamp.timeIntervalSince1970) newCount=\(newCount)")
+            spaces[index].unreadCount = newCount
         }
         updateDockBadge()
     }
@@ -1794,6 +1799,7 @@ class ChatViewModel: NSObject,ObservableObject {
     private func updateDockBadge() {
         let total = spaces.reduce(0) { $0 + $1.unreadCount }
         NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : ""
+        print("🟦 [Dot] updateDockBadge total=\(total) perSpace=\(spaces.filter { $0.unreadCount > 0 }.map { "\($0.name):\($0.unreadCount)" })")
     }
     
     /// Sorts spaces: pinned chats stay on top in their stable pin order
