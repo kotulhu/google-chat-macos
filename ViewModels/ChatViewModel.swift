@@ -36,6 +36,7 @@ class ChatViewModel: NSObject,ObservableObject {
     private let defaults = UserDefaults.standard
     private let lastReadKeyPrefix = "lastRead_"
     private var backgroundTimer: Timer?
+    private let threadLastReadKeyPrefix = "threadLastRead_"
     
     
     @Published private(set) var accessToken: String = ""
@@ -48,6 +49,7 @@ class ChatViewModel: NSObject,ObservableObject {
     private var messagesPageToken: String?
     
     private var sentNotificationIds = Set<String>()
+    @Published private var threadReadMarks: [String: Date] = [:]
 
     /// Newest incoming message timestamp already observed per space this
     /// session. The first sighting only seeds the mark, so history that was
@@ -246,6 +248,7 @@ class ChatViewModel: NSObject,ObservableObject {
         
         sentNotificationIds.removeAll()
         lastKnownIncoming.removeAll()
+        threadReadMarks.removeAll()
         print("🧹 sentNotificationIds cleared")
         Task {
             await setCurrentUserId()
@@ -341,6 +344,64 @@ class ChatViewModel: NSObject,ObservableObject {
         return incoming.filter { $0.timestamp > lastRead }.count
     }
 
+    private func threadReadKey(spaceId: String, threadName: String) -> String {
+        threadLastReadKeyPrefix + spaceId + "_" + threadName
+    }
+
+    private func threadLastReadTimestamp(spaceId: String, threadName: String) -> Date? {
+        let key = threadReadKey(spaceId: spaceId, threadName: threadName)
+        return threadReadMarks[key] ?? defaults.object(forKey: key) as? Date
+    }
+
+    private func saveThreadLastReadTimestamp(_ date: Date, spaceId: String, threadName: String) {
+        let key = threadReadKey(spaceId: spaceId, threadName: threadName)
+        threadReadMarks[key] = date
+        defaults.set(date, forKey: key)
+    }
+
+    /// Seeds a thread's local read position without treating existing history
+    /// as a new reply. A space read mark is the best existing baseline; when no
+    /// space mark exists, the newest known incoming reply becomes the baseline.
+    private func seedThreadReadBaselines(from messages: [Message], spaceId: String) {
+        let repliesByThread = Dictionary(grouping: messages.filter {
+            $0.isThreadReply && !$0.isFromMe && $0.threadName != nil && !$0.threadName!.isEmpty
+        }) { $0.threadName! }
+
+        for (threadName, replies) in repliesByThread {
+            guard threadLastReadTimestamp(spaceId: spaceId, threadName: threadName) == nil,
+                  let newestReply = replies.map(\.timestamp).max() else { continue }
+            let baseline = loadLastReadTimestamp(for: spaceId) ?? newestReply
+            saveThreadLastReadTimestamp(baseline, spaceId: spaceId, threadName: threadName)
+        }
+    }
+
+    func unreadReplyCount(inThreadNamed threadName: String?, spaceId: String) -> Int {
+        guard let threadName, !threadName.isEmpty else { return 0 }
+        let replies = replies(inThreadNamed: threadName).filter { !$0.isFromMe }
+        guard let lastRead = threadLastReadTimestamp(spaceId: spaceId, threadName: threadName) else {
+            return 0
+        }
+        return replies.filter { $0.timestamp > lastRead }.count
+    }
+
+    func hasUnreadReplies(for message: Message, in spaceId: String) -> Bool {
+        guard !message.isThreadReply,
+              let threadName = message.threadName,
+              !threadName.isEmpty else { return false }
+        return unreadReplyCount(inThreadNamed: threadName, spaceId: spaceId) > 0
+    }
+
+    /// Advances the local read position for a reply once its row is visible.
+    func markThreadReplyAsRead(_ message: Message, in spaceId: String) {
+        guard message.isThreadReply,
+              !message.isFromMe,
+              let threadName = message.threadName,
+              !threadName.isEmpty else { return }
+        let current = threadLastReadTimestamp(spaceId: spaceId, threadName: threadName)
+        guard current == nil || message.timestamp > current! else { return }
+        saveThreadLastReadTimestamp(message.timestamp, spaceId: spaceId, threadName: threadName)
+    }
+
     /// Reconciles one space's sidebar/dock badge and its popup from a single
     /// latest-message page.
     ///
@@ -357,43 +418,46 @@ class ChatViewModel: NSObject,ObservableObject {
     private func syncIncomingState(_ messages: [Message], for spaceId: String, notify: Bool) async {
         guard let index = spaces.firstIndex(where: { $0.id == spaceId }) else { return }
 
+        seedThreadReadBaselines(from: messages, spaceId: spaceId)
+
         if let newest = messages.first {
             spaces[index].lastMessageTimestamp = newest.timestamp
         }
 
-        let candidate = messages.first(where: { !$0.isFromMe })
         let previous = lastKnownIncoming[spaceId]
-        let isArrival: Bool
-        if let candidate, let previous {
-            isArrival = candidate.timestamp > previous
+        let newIncoming: [Message]
+        if let previous {
+            newIncoming = messages
+                .filter { !$0.isFromMe && $0.timestamp > previous }
+                .sorted { $0.timestamp < $1.timestamp }
         } else {
-            isArrival = false
+            newIncoming = []
         }
+        let isArrival = !newIncoming.isEmpty
 
         // Arriving messages are unread by definition, so the dot can never be
         // zero while their popup is on screen.
-        let rawCount = unreadCount(from: messages, spaceId: spaceId)
-        var count = rawCount
+        var count = unreadCount(from: messages, spaceId: spaceId)
         if isArrival {
             count = max(count, 1)
         }
         spaces[index].unreadCount = count
 
-        if let candidate {
-            lastKnownIncoming[spaceId] = max(previous ?? .distantPast, candidate.timestamp)
+        if let newestIncoming = messages.first(where: { !$0.isFromMe }) {
+            lastKnownIncoming[spaceId] = max(previous ?? .distantPast, newestIncoming.timestamp)
         }
-
-        print("🟥 [Dot] sync space=\(spaces[index].name) type=\(spaces[index].type) notify=\(notify) isArrival=\(isArrival) raw=\(rawCount) count=\(count) candidateTs=\(candidate?.timestamp.timeIntervalSince1970 ?? -1) prev=\(previous?.timeIntervalSince1970 ?? -1) lastRead=\(loadLastReadTimestamp(for: spaceId)?.timeIntervalSince1970 ?? -1)")
 
         updateDockBadge()
 
-        guard notify, isArrival, let candidate else { return }
-        let dedupId = "\(spaceId)_\(candidate.timestamp.timeIntervalSince1970)"
-        guard !sentNotificationIds.contains(dedupId) else { return }
-        sentNotificationIds.insert(dedupId)
+        guard notify, isArrival else { return }
+        for incoming in newIncoming {
+            let dedupId = "\(spaceId)_\(incoming.id)"
+            guard !sentNotificationIds.contains(dedupId) else { continue }
+            sentNotificationIds.insert(dedupId)
 
-        let resolved = await messageWithResolvedAuthor(candidate)
-        sendNotification(for: resolved, in: spaces[index])
+            let resolved = await messageWithResolvedAuthor(incoming)
+            sendNotification(for: resolved, in: spaces[index])
+        }
     }
     
     /// Starts the 30-second unread-count background refresh.
@@ -604,6 +668,7 @@ class ChatViewModel: NSObject,ObservableObject {
         isLoading = false
         sentNotificationIds.removeAll()
         lastKnownIncoming.removeAll()
+        threadReadMarks.removeAll()
         stopPolling()
         stopTokenRefreshTimer()
         stopBackgroundRefresh()
@@ -1470,14 +1535,6 @@ class ChatViewModel: NSObject,ObservableObject {
         return L.str("thread.new")
     }
 
-    /// True when the message has a thread we can address directly — i.e. it is
-    /// itself a reply. A standalone message has no thread yet; it gets one from
-    /// its own id when the first reply is posted.
-    func hasThread(_ message: Message) -> Bool {
-        guard let name = message.threadName else { return false }
-        return !name.isEmpty && (message.isThreadReply || replyCount(inThreadNamed: name) > 0)
-    }
-
     /// Expands or collapses the thread behind a root message, fetching its
     /// replies the first time it is opened.
     func toggleThread(rootMessageId: String) async {
@@ -1529,6 +1586,7 @@ class ChatViewModel: NSObject,ObservableObject {
         }
 
         guard !collected.isEmpty else { return }
+        seedThreadReadBaselines(from: collected, spaceId: space.id)
         await nameResolver.resolve(userIds: Set(collected.compactMap { $0.senderId }))
         let resolved = collected.map { msg -> Message in
             var copy = msg
@@ -1552,15 +1610,19 @@ class ChatViewModel: NSObject,ObservableObject {
 
     /// Points the composer at the thread of `message`.
     ///
-    /// A message that already sits inside a thread is addressed by its
-    /// `threadName`, which is guaranteed to exist. A message that was never
-    /// replied to has no thread resource yet, so it is addressed by `threadKey`
-    /// derived from its own id — the same id Google Chat would assign.
+    /// A reply is always addressed by the message's `threadName`. The API hands
+    /// every message a thread resource name — a message that was never replied
+    /// to still carries one equal to its own id — and replying into a thread a
+    /// person created **requires** `thread.name`: a `threadKey` addresses a
+    /// thread private to this app, so the reply would land as its own top-level
+    /// thread root instead of nesting under the original message.
     func beginThreadReply(to message: Message) {
-        if hasThread(message), let name = message.threadName {
+        if let name = message.threadName, !name.isEmpty {
             threadReplyTarget = .reply(threadName: name, rootMessageId: message.id)
             expandedThreadNames.insert(name)
         } else {
+            // Only reachable for a message with no thread info at all (e.g. an
+            // optimistic local echo), where a key is the best we can do.
             threadReplyTarget = .newThread(rootMessageId: message.id, threadKey: message.threadId)
         }
     }
@@ -1594,6 +1656,8 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Persists the last-read timestamp for a space and updates the unread badge.
     func markMessageAsRead(_ message: Message, in spaceId: String) {
         guard !message.isFromMe else { return }
+
+        markThreadReplyAsRead(message, in: spaceId)
         
         let currentLastRead = loadLastReadTimestamp(for: spaceId)
         if let currentLastRead, message.timestamp <= currentLastRead {
@@ -1604,9 +1668,7 @@ class ChatViewModel: NSObject,ObservableObject {
         
         if let index = spaces.firstIndex(where: { $0.id == spaceId }) {
             spaces[index].lastReadTimestamp = message.timestamp
-            let newCount = unreadCount(from: messages, spaceId: spaceId)
-            print("🟩 [Dot] markRead space=\(spaces[index].name) type=\(spaces[index].type) msgTs=\(message.timestamp.timeIntervalSince1970) newCount=\(newCount)")
-            spaces[index].unreadCount = newCount
+            spaces[index].unreadCount = unreadCount(from: messages, spaceId: spaceId)
         }
         updateDockBadge()
     }
@@ -1799,7 +1861,6 @@ class ChatViewModel: NSObject,ObservableObject {
     private func updateDockBadge() {
         let total = spaces.reduce(0) { $0 + $1.unreadCount }
         NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : ""
-        print("🟦 [Dot] updateDockBadge total=\(total) perSpace=\(spaces.filter { $0.unreadCount > 0 }.map { "\($0.name):\($0.unreadCount)" })")
     }
     
     /// Sorts spaces: pinned chats stay on top in their stable pin order

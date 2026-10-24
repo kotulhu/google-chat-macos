@@ -18,6 +18,8 @@ struct MessageBubbleView: View {
     /// Label for the thread action, supplied by the view model so it can tell
     /// whether the thread already exists. Falls back to "start thread".
     var threadActionTitle: String? = nil
+    /// Highlights a thread root while it has unread incoming replies.
+    var hasUnreadThreadReplies: Bool = false
     /// Opens the "add custom icon" upload sheet.
     var onAddCustomIcon: (() -> Void)? = nil
     /// Looks up the live message for a quoted id in the current feed.
@@ -49,13 +51,13 @@ struct MessageBubbleView: View {
                             Button(nameResolver.displayName(for: senderId)) {
                                 onSenderTap?(senderId)
                             }
-                            .font(.caption)
+                            .font(.caption.weight(hasUnreadThreadReplies ? .semibold : .regular))
                             .foregroundColor(.secondary)
                             .buttonStyle(.plain)
                         }
                     } else {
                         Text(message.authorName)
-                            .font(.caption)
+                            .font(.caption.weight(hasUnreadThreadReplies ? .semibold : .regular))
                             .foregroundColor(.secondary)
                     }
                 }
@@ -70,6 +72,7 @@ if let quoted = message.quotedMessage {
                         message.text.attributedStringWithLinks(mentionDisplayNames: mentionDisplayNames)
                     }
                     Text(attributedText)
+                        .font(.body.weight(hasUnreadThreadReplies ? .semibold : .regular))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(message.isFromMe ? Color.blue.opacity(0.6) : Color(NSColor.controlBackgroundColor))

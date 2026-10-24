@@ -720,6 +720,7 @@ struct ChatDetailView: View {
                 newMessageText = ""
             },
             threadActionTitle: chatVM.threadActionTitle(for: message),
+            hasUnreadThreadReplies: chatVM.hasUnreadReplies(for: message, in: space.id),
             onAddCustomIcon: {
                 isAddCustomEmojiOpen = true
             },
