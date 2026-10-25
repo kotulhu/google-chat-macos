@@ -1,5 +1,31 @@
 import Foundation
 
+struct FeedFontSettings: Codable, Equatable {
+    var family: String
+    var size: Double
+    var style: String
+    var colorHex: String
+
+    init(family: String, size: Double, style: String, colorHex: String = "default") {
+        self.family = family
+        self.size = size
+        self.style = style
+        self.colorHex = colorHex
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case family, size, style, colorHex
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        family = try container.decode(String.self, forKey: .family)
+        size = try container.decode(Double.self, forKey: .size)
+        style = try container.decode(String.self, forKey: .style)
+        colorHex = try container.decodeIfPresent(String.self, forKey: .colorHex) ?? "default"
+    }
+}
+
 final class ConfigManager: ObservableObject {
     static let shared = ConfigManager()
     
@@ -7,6 +33,17 @@ final class ConfigManager: ObservableObject {
     private let clientIDKey = "googleClientID"
     private let displayNameKey = "localDisplayName"
     private let pinnedSpaceIdsKey = "pinnedSpaceIds"
+    private let feedFontFamilyKey = "feedFontFamily"
+    private let feedFontSizeKey = "feedFontSize"
+    private let feedFontStyleKey = "feedFontStyle"
+    private let feedFontSettingsKey = "feedFontSettings"
+
+    static let feedFontFamilies = [
+        "system", "SF Pro", "Helvetica Neue", "Avenir Next", "Menlo", "Georgia"
+    ]
+    static let feedFontSizes: [Double] = [12, 14, 16, 18, 20, 22, 24]
+    static let feedFontStyles = ["regular", "semibold", "bold", "italic", "boldItalic"]
+    static let feedFontElements = ["time", "sender", "text", "link"]
     
     @Published var clientID: String {
         didSet {
@@ -61,6 +98,25 @@ final class ConfigManager: ObservableObject {
             NotificationCenter.default.post(name: Self.localDisplayNameDidChangeNotification, object: nil)
         }
     }
+
+    @Published private(set) var feedFontSettings: [String: FeedFontSettings] {
+        didSet {
+            guard let data = try? JSONEncoder().encode(feedFontSettings) else { return }
+            defaults.set(data, forKey: feedFontSettingsKey)
+        }
+    }
+
+    func fontSettings(for element: String) -> FeedFontSettings {
+        feedFontSettings[element] ?? Self.defaultFeedFontSettings(for: element)
+    }
+
+    func updateFontSettings(_ settings: FeedFontSettings, for element: String) {
+        feedFontSettings[element] = settings
+    }
+
+    func resetFontSettings(for element: String) {
+        feedFontSettings[element] = Self.defaultFeedFontSettings(for: element)
+    }
     
     private init() {
         clientID = defaults.string(forKey: clientIDKey)
@@ -68,6 +124,38 @@ final class ConfigManager: ObservableObject {
             ?? ""
         localDisplayName = defaults.string(forKey: displayNameKey) ?? ""
         pinnedSpaceIds = defaults.stringArray(forKey: pinnedSpaceIdsKey) ?? []
+
+        let legacyFamily = defaults.string(forKey: feedFontFamilyKey) ?? "system"
+        let legacySize = defaults.double(forKey: feedFontSizeKey)
+        let legacyStyle = defaults.string(forKey: feedFontStyleKey) ?? "regular"
+        let legacySettings = FeedFontSettings(
+            family: legacyFamily,
+            size: legacySize > 0 ? legacySize : 16,
+            style: legacyStyle
+        )
+
+        let storedSettings = defaults.data(forKey: feedFontSettingsKey)
+            .flatMap { try? JSONDecoder().decode([String: FeedFontSettings].self, from: $0) }
+        var loadedSettings = storedSettings ?? [:]
+        for element in Self.feedFontElements where loadedSettings[element] == nil {
+            var migrated = Self.defaultFeedFontSettings(for: element)
+            migrated.family = legacySettings.family
+            migrated.size = legacySettings.size
+            migrated.style = legacySettings.style
+            loadedSettings[element] = migrated
+        }
+        feedFontSettings = loadedSettings
+    }
+
+    private static func defaultFeedFontSettings(for element: String) -> FeedFontSettings {
+        switch element {
+        case "time", "sender":
+            return FeedFontSettings(family: "system", size: 12, style: "regular", colorHex: "#8E8E93")
+        case "link":
+            return FeedFontSettings(family: "system", size: 16, style: "regular", colorHex: "#007AFF")
+        default:
+            return FeedFontSettings(family: "system", size: 16, style: "regular")
+        }
     }
 
     private static func bundleString(forKey key: String) -> String? {

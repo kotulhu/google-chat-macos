@@ -28,6 +28,7 @@ struct MessageBubbleView: View {
     var onQuoteTap: ((String) -> Void)? = nil
     
     @ObservedObject private var reactionHistory = ReactionHistoryStore.shared
+    @ObservedObject private var config = ConfigManager.shared
     @ObservedObject var nameResolver: NameResolver
     /// Fallback avatar URLs from the space's membership list, used when the
     /// People API has no photo for a sender.
@@ -51,14 +52,14 @@ struct MessageBubbleView: View {
                             Button(nameResolver.displayName(for: senderId)) {
                                 onSenderTap?(senderId)
                             }
-                            .font(.caption.weight(hasUnreadThreadReplies ? .semibold : .regular))
-                            .foregroundColor(.secondary)
+                            .font(feedSenderFont)
+                            .foregroundColor(feedSenderColor)
                             .buttonStyle(.plain)
                         }
                     } else {
                         Text(message.authorName)
-                            .font(.caption.weight(hasUnreadThreadReplies ? .semibold : .regular))
-                            .foregroundColor(.secondary)
+                            .font(feedSenderFont)
+                            .foregroundColor(feedSenderColor)
                     }
                 }
                 
@@ -69,14 +70,18 @@ if let quoted = message.quotedMessage {
 
                 if !message.text.isEmpty {
                     let attributedText = PerfBeacon.measureReturn("Render", phase: "attributed", minMs: 3, detail: "len=\(message.text.count)") {
-                        message.text.attributedStringWithLinks(mentionDisplayNames: mentionDisplayNames)
+                        message.text.attributedStringWithLinks(
+                            mentionDisplayNames: mentionDisplayNames,
+                            linkFont: feedLinkFont,
+                            linkColor: feedLinkColor
+                        )
                     }
                     Text(attributedText)
-                        .font(.body.weight(hasUnreadThreadReplies ? .semibold : .regular))
+                        .font(feedMessageFont)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(message.isFromMe ? Color.blue.opacity(0.6) : Color(NSColor.controlBackgroundColor))
-                        .foregroundColor(message.isFromMe ? .white : .primary)
+                        .foregroundColor(feedTextColor)
                         .cornerRadius(16)
                         .textSelection(.enabled)
                         .environment(\.openURL, OpenURLAction { url in
@@ -118,8 +123,8 @@ if let quoted = message.quotedMessage {
                 }
                 
                 Text(formatFullDate(message.timestamp))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .font(feedTimeFont)
+                    .foregroundColor(feedTimeColor)
             }
             
             if !message.isFromMe { Spacer() }
@@ -172,6 +177,72 @@ if let quoted = message.quotedMessage {
         .onDisappear {
             onViewportHidden?(message.id)
         }
+    }
+
+    private var feedMessageFont: Font {
+        let settings = config.fontSettings(for: "text")
+        return configuredFont(settings: settings, emphasized: hasUnreadThreadReplies)
+    }
+
+    private var feedTextColor: Color {
+        configuredColor(for: "text", defaultColor: message.isFromMe ? .white : .primary)
+    }
+
+    private var feedSenderFont: Font {
+        let settings = config.fontSettings(for: "sender")
+        return configuredFont(settings: settings, emphasized: hasUnreadThreadReplies)
+    }
+
+    private var feedSenderColor: Color {
+        configuredColor(for: "sender", defaultColor: .secondary)
+    }
+
+    private var feedTimeFont: Font {
+        configuredFont(settings: config.fontSettings(for: "time"), emphasized: false)
+    }
+
+    private var feedTimeColor: Color {
+        configuredColor(for: "time", defaultColor: .secondary)
+    }
+
+    private var feedLinkFont: Font {
+        configuredFont(settings: config.fontSettings(for: "link"), emphasized: hasUnreadThreadReplies)
+    }
+
+    private var feedLinkColor: Color {
+        configuredColor(for: "link", defaultColor: .blue)
+    }
+
+    private func configuredColor(for element: String, defaultColor: Color) -> Color {
+        let colorHex = config.fontSettings(for: element).colorHex
+        return colorHex == "default" ? defaultColor : Color(feedHex: colorHex)
+    }
+
+    private func configuredFont(settings: FeedFontSettings, emphasized: Bool) -> Font {
+        var font: Font
+        if settings.family == "system" {
+            font = .system(size: CGFloat(settings.size))
+        } else {
+            font = .custom(settings.family, size: CGFloat(settings.size))
+        }
+
+        switch settings.style {
+        case "semibold":
+            font = font.weight(.semibold)
+        case "bold":
+            font = font.weight(.bold)
+        case "italic":
+            font = font.italic()
+        case "boldItalic":
+            font = font.weight(.bold).italic()
+        default:
+            break
+        }
+
+        if emphasized && settings.style != "bold" && settings.style != "boldItalic" {
+            font = font.weight(.semibold)
+        }
+        return font
     }
 
     /// Toggles a reaction on this message through the parent view model.

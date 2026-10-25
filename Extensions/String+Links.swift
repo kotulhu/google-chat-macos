@@ -2,7 +2,11 @@ import Foundation
 import SwiftUI
 
 extension String {
-    func attributedStringWithLinks(mentionDisplayNames: [String: String] = [:]) -> AttributedString {
+    func attributedStringWithLinks(
+        mentionDisplayNames: [String: String] = [:],
+        linkFont: Font? = nil,
+        linkColor: Color = .blue
+    ) -> AttributedString {
         let displayText = replacingMentions(with: mentionDisplayNames)
         var attributedString = AttributedString(displayText)
         displayText.highlightMentions(in: &attributedString, mentionDisplayNames: mentionDisplayNames)
@@ -18,8 +22,11 @@ extension String {
                 let attributedRange = startIndex..<endIndex
                 
                 attributedString[attributedRange].link = url
-                attributedString[attributedRange].foregroundColor = .blue
+                attributedString[attributedRange].foregroundColor = linkColor
                 attributedString[attributedRange].underlineStyle = .single
+                if let linkFont {
+                    attributedString[attributedRange].font = linkFont
+                }
             }
         }
         

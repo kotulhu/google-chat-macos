@@ -79,9 +79,26 @@ public enum RussianStrings {
         // Settings
         "display.name": "Отображаемое имя",
         "settings.oauth.note": "OAuth Client ID используется при входе. Reversed Client ID генерируется из него автоматически и должен совпадать со значением GOOGLE_REVERSED_CLIENT_ID в локальном GoogleChat.local.xcconfig, потому что macOS регистрирует callback из Info.plist при сборке приложения.",
-        "settings.reversed.help": "Только для чтения – выводится из OAuth Client ID разворотом dot-компонентов.",
+         "settings.reversed.help": "Только для чтения – выводится из OAuth Client ID разворотом dot-компонентов.",
+        "settings.font.section": "Шрифт чата",
+        "settings.font.element": "Элемент",
+        "settings.font.element.time": "Время",
+        "settings.font.element.sender": "Отправитель",
+        "settings.font.element.text": "Текст",
+        "settings.font.element.link": "Ссылка",
+        "settings.font.family": "Шрифт",
+        "settings.font.family.system": "Системный",
+        "settings.font.size": "Размер",
+        "settings.font.style": "Стиль",
+        "settings.font.color": "Цвет",
+        "settings.font.reset": "Сбросить выбранный элемент",
+        "settings.font.style.regular": "Обычный",
+        "settings.font.style.semibold": "Полужирный",
+        "settings.font.style.bold": "Жирный",
+        "settings.font.style.italic": "Курсив",
+        "settings.font.style.boldItalic": "Жирный курсив",
 
-        // Проверка уведомлений
+         // Проверка уведомлений
         "settings.notify.section": "Уведомления",
         "settings.notify.status": "Разрешение",
         "settings.notify.status.granted": "Разрешены",

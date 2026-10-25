@@ -78,9 +78,26 @@ public enum EnglishStrings {
         // Settings
         "display.name": "Display name",
         "settings.oauth.note": "OAuth Client ID is used for signing in. The Reversed Client ID is generated from it automatically and must match the value baked into the app (GOOGLE_REVERSED_CLIENT_ID in GoogleChat.local.xcconfig), because macOS registers the OAuth callback URL scheme from Info.plist at build time.",
-        "settings.reversed.help": "Read-only – derived from the OAuth Client ID by reversing its dot-separated components.",
+         "settings.reversed.help": "Read-only – derived from the OAuth Client ID by reversing its dot-separated components.",
+        "settings.font.section": "Chat font",
+        "settings.font.element": "Element",
+        "settings.font.element.time": "Time",
+        "settings.font.element.sender": "Sender",
+        "settings.font.element.text": "Text",
+        "settings.font.element.link": "Link",
+        "settings.font.family": "Font",
+        "settings.font.family.system": "System",
+        "settings.font.size": "Size",
+        "settings.font.style": "Style",
+        "settings.font.color": "Color",
+        "settings.font.reset": "Reset selected element",
+        "settings.font.style.regular": "Regular",
+        "settings.font.style.semibold": "Semibold",
+        "settings.font.style.bold": "Bold",
+        "settings.font.style.italic": "Italic",
+        "settings.font.style.boldItalic": "Bold italic",
 
-        // Notifications self-test
+         // Notifications self-test
         "settings.notify.section": "Notifications",
         "settings.notify.status": "Permission",
         "settings.notify.status.granted": "Allowed",
