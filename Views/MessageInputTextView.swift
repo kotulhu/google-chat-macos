@@ -7,7 +7,10 @@ final class ChatInputTextView: NSTextView {
     var onSend: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
-        guard let chars = event.charactersIgnoringModifiers, chars == "\r" || chars == "\n" else {
+        let isReturnKey = event.keyCode == 36 || event.keyCode == 76
+        let isReturnCharacter = event.charactersIgnoringModifiers == "\r"
+            || event.charactersIgnoringModifiers == "\n"
+        guard isReturnKey || isReturnCharacter else {
             super.keyDown(with: event)
             return
         }
@@ -16,7 +19,8 @@ final class ChatInputTextView: NSTextView {
             super.keyDown(with: event)
             return
         }
-        if event.modifierFlags.contains(.control) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers.contains(.control) || modifiers.contains(.shift) {
             insertNewline(nil)
         } else {
             onSend?()
