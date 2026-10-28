@@ -86,6 +86,7 @@ public enum RussianStrings {
         "settings.font.element.sender": "Отправитель",
         "settings.font.element.text": "Текст",
         "settings.font.element.link": "Ссылка",
+        "settings.font.element.quote": "Цитата",
         "settings.font.family": "Шрифт",
         "settings.font.family.system": "Системный",
         "settings.font.size": "Размер",

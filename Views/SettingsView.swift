@@ -148,6 +148,7 @@ struct SettingsView: View {
         case "sender": return L.str("settings.font.element.sender")
         case "text": return L.str("settings.font.element.text")
         case "link": return L.str("settings.font.element.link")
+        case "quote": return L.str("settings.font.element.quote")
         default: return element
         }
     }

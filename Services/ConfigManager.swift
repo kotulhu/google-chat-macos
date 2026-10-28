@@ -43,7 +43,7 @@ final class ConfigManager: ObservableObject {
     ]
     static let feedFontSizes: [Double] = [12, 14, 16, 18, 20, 22, 24]
     static let feedFontStyles = ["regular", "semibold", "bold", "italic", "boldItalic"]
-    static let feedFontElements = ["time", "sender", "text", "link"]
+    static let feedFontElements = ["time", "sender", "text", "link", "quote"]
     
     @Published var clientID: String {
         didSet {
@@ -153,6 +153,8 @@ final class ConfigManager: ObservableObject {
             return FeedFontSettings(family: "system", size: 12, style: "regular", colorHex: "#8E8E93")
         case "link":
             return FeedFontSettings(family: "system", size: 16, style: "regular", colorHex: "#007AFF")
+        case "quote":
+            return FeedFontSettings(family: "system", size: 14, style: "italic", colorHex: "#8E8E93")
         default:
             return FeedFontSettings(family: "system", size: 16, style: "regular")
         }

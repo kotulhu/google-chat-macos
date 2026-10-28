@@ -38,30 +38,34 @@ struct MemberManagementView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 4)
             } else if !searchQuery.isEmpty && !searchResults.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(L.str("add.member.header"))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    ForEach(searchResults) { user in
-                        HStack {
-                            AvatarImage(url: user.avatarURL, name: user.displayTitle, accessToken: chatVM.accessToken)
-                                .frame(width: 24, height: 24)
-                            Text(user.displayTitle)
-                                .lineLimit(1)
-                            Spacer()
-                            if memberIds.contains(user.id) {
-                                Text(L.str("already.in.chat"))
-                                    .foregroundColor(.secondary)
-                            } else {
-                                Button(L.str("add")) {
-                                    addMember(user)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L.str("add.member.header"))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        ForEach(searchResults) { user in
+                            HStack {
+                                AvatarImage(url: user.avatarURL, name: user.displayTitle, accessToken: chatVM.accessToken)
+                                    .frame(width: 24, height: 24)
+                                Text(user.displayTitle)
+                                    .lineLimit(1)
+                                Spacer()
+                                if memberIds.contains(user.id) {
+                                    Text(L.str("already.in.chat"))
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Button(L.str("add")) {
+                                        addMember(user)
+                                    }
                                 }
                             }
-                        }
-                        .padding(.vertical, 2)
+                            .padding(.vertical, 2)
+                            Divider()
+                            }
                     }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
+                .frame(maxHeight: 180)
             } else if !searchQuery.isEmpty {
                 Text(L.str("no.results"))
                     .foregroundColor(.secondary)

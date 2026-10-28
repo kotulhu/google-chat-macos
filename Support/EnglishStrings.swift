@@ -85,6 +85,7 @@ public enum EnglishStrings {
         "settings.font.element.sender": "Sender",
         "settings.font.element.text": "Text",
         "settings.font.element.link": "Link",
+        "settings.font.element.quote": "Quoted message",
         "settings.font.family": "Font",
         "settings.font.family.system": "System",
         "settings.font.size": "Size",

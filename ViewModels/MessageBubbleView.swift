@@ -213,6 +213,21 @@ if let quoted = message.quotedMessage {
         configuredColor(for: "link", defaultColor: .blue)
     }
 
+    private var feedQuoteFont: Font {
+        configuredFont(settings: config.fontSettings(for: "quote"), emphasized: false)
+    }
+
+    private var feedQuoteAuthorFont: Font {
+        let settings = config.fontSettings(for: "quote")
+        var compact = settings
+        compact.size = max(10, settings.size * 0.75)
+        return configuredFont(settings: compact, emphasized: false)
+    }
+
+    private var feedQuoteColor: Color {
+        configuredColor(for: "quote", defaultColor: .secondary)
+    }
+
     private func configuredColor(for element: String, defaultColor: Color) -> Color {
         let colorHex = config.fontSettings(for: element).colorHex
         return colorHex == "default" ? defaultColor : Color(feedHex: colorHex)
@@ -264,17 +279,17 @@ if let quoted = message.quotedMessage {
             onQuoteTap?(quoted.messageId)
         } label: {
             HStack(alignment: .top, spacing: 8) {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Color.accentColor.opacity(0.6))
-                    .frame(width: 3)
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.accentColor.opacity(0.6))
+                        .frame(width: 3)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(quoteAuthor?.isEmpty == false ? quoteAuthor! : L.str("quote.original"))
-                        .font(.caption2.italic())
-                        .foregroundColor(.secondary)
+                        .font(feedQuoteAuthorFont)
+                        .foregroundColor(feedQuoteColor)
                     if let quoteText, !quoteText.isEmpty {
                         Text(quoteText)
-                            .font(.footnote.italic())
-                            .foregroundColor(.secondary)
+                            .font(feedQuoteFont)
+                            .foregroundColor(feedQuoteColor)
                             .lineLimit(4)
                             .multilineTextAlignment(.leading)
                     }
