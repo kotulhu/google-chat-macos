@@ -64,7 +64,9 @@ struct MessageBubbleView: View {
                 }
                 
 
-if let quoted = message.quotedMessage {
+if let forwarded = message.forwardedMessage {
+                    forwardedBlock(forwarded)
+                } else if let quoted = message.quotedMessage {
                     quotedBlock(quoted)
                 }
 
@@ -131,7 +133,7 @@ if let quoted = message.quotedMessage {
         }
         .padding(.horizontal)
         .contextMenu {
-            if !message.text.isEmpty || !message.attachments.isEmpty {
+            if !message.text.isEmpty || !message.attachments.isEmpty || message.forwardedMessage != nil {
                 Button(L.str("copy.text")) {
                     copyToClipboard()
                 }
@@ -267,6 +269,73 @@ if let quoted = message.quotedMessage {
         }
     }
 
+    /// Renders the snapshot embedded in a forwarded message. Unlike a quote,
+    /// this is the whole message: the destination row often has no text and no
+    /// attachments of its own. There is deliberately no tap target — the source
+    /// message usually belongs to a space the reader cannot open.
+    @ViewBuilder
+    private func forwardedBlock(_ forwarded: ForwardedMessage) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            RoundedRectangle(cornerRadius: 1)
+                .fill(Color.accentColor.opacity(0.6))
+                .frame(width: 3)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrowshape.turn.up.right.fill")
+                        .font(.caption2)
+                    Text(L.str("forward.title"))
+                        .font(feedQuoteAuthorFont)
+                }
+                .foregroundColor(feedQuoteColor)
+
+                if let source = forwarded.sourceSpaceName, !source.isEmpty {
+                    Text(L.str("forward.from", source))
+                        .font(feedQuoteAuthorFont)
+                        .foregroundColor(feedQuoteColor)
+                }
+
+                if let author = forwarded.authorName, !author.isEmpty {
+                    Text(author)
+                        .font(feedSenderFont)
+                        .foregroundColor(feedSenderColor)
+                }
+
+                if let text = forwarded.text, !text.isEmpty {
+                    let attributedText = text.attributedStringWithLinks(
+                        mentionDisplayNames: mentionDisplayNames,
+                        linkFont: feedLinkFont,
+                        linkColor: feedLinkColor
+                    )
+                    Text(attributedText)
+                        .font(feedMessageFont)
+                        .foregroundColor(configuredColor(for: "text", defaultColor: .primary))
+                        .textSelection(.enabled)
+                        .environment(\.openURL, OpenURLAction { url in
+                            NSWorkspace.shared.open(url)
+                            return .handled
+                        })
+                }
+
+                if !forwarded.attachments.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(forwarded.attachments) { attachment in
+                            AttachmentRow(
+                                attachment: attachment,
+                                accessToken: accessToken
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
+        .cornerRadius(8)
+    }
+
     /// The quoted-message block rendered above the main bubble: a thin accent
     /// border, a light backdrop, the author and a snippet in italics, and the
     /// whole block is clickable to jump to the original message.
@@ -309,9 +378,12 @@ if let quoted = message.quotedMessage {
 
     /// Copies the raw message text into the system pasteboard.
     private func copyToClipboard() {
+        let parts = [message.text, message.forwardedMessage?.text ?? ""]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let text = parts.isEmpty ? message.forwardedMessage?.formattedText ?? "" : parts.joined(separator: "\n\n")
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(message.text, forType: .string)
+        pasteboard.setString(text, forType: .string)
         print("📋 Text copied")
     }
 

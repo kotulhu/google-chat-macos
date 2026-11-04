@@ -271,10 +271,26 @@ class GoogleChatService {
 
         struct QuotedMessageMetadataItem: Decodable {
             let name: String?
+            let lastUpdateTime: String?
+            let quoteType: String?
+            let quotedMessageSnapshot: QuotedMessageSnapshotItem?
+            let forwardedMetadata: ForwardedMetadataItem?
+        }
+
+        struct QuotedMessageSnapshotItem: Decodable {
+            let sender: String?
+            let text: String?
+            let formattedText: String?
+            let attachments: [AttachmentItem]?
+        }
+
+        struct ForwardedMetadataItem: Decodable {
+            let space: String?
+            let spaceDisplayName: String?
         }
 
         struct AttachmentItem: Decodable {
-            let name: String
+            let name: String?
             let contentName: String?
             let contentType: String?
             let attachmentDataRef: AttachmentDataRef?
@@ -290,6 +306,40 @@ class GoogleChatService {
         struct Sender: Decodable {
             let name: String
             let displayName: String?
+        }
+
+        /// Returns a value suitable for a display name (trimmed, non-empty).
+        func trimmedName(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        /// Keeps message content verbatim but treats an empty string as absent.
+        func nonEmptyText(_ value: String?) -> String? {
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }
+
+        /// Maps an API attachment into the app model. Shared by top-level
+        /// attachments and by the copies embedded in a forwarded snapshot.
+        func makeAttachment(_ attach: AttachmentItem) -> Attachment {
+            let contentName = trimmedName(attach.contentName)
+                ?? attach.name?.components(separatedBy: "/").last
+                ?? "attachment"
+            let contentType = attach.contentType ?? "application/octet-stream"
+            let token = attach.attachmentDataRef?.attachmentUploadToken
+                ?? attachmentToken(from: attach.downloadUri)
+                ?? attachmentToken(from: attach.thumbnailUri)
+            return Attachment(
+                name: contentName,
+                url: attach.downloadUri.flatMap { URL(string: $0) },
+                mimeType: contentType,
+                size: 0,
+                thumbnailURL: attach.thumbnailUri.flatMap { URL(string: $0) },
+                resourceName: attach.attachmentDataRef?.resourceName ?? attach.name,
+                uploadToken: token
+            )
         }
         
         PerfBeacon.start("Net", phase: "fetchMessages:decode")
@@ -327,30 +377,47 @@ class GoogleChatService {
             
             let timestamp = GoogleChatService.parseGoogleTimestamp(msg.createTime)
             
-            let attachments: [Attachment] = msg.attachment?.compactMap { attach -> Attachment? in
-                let contentName = attach.contentName ?? attach.name.components(separatedBy: "/").last ?? "attachment"
-                let contentType = attach.contentType ?? "application/octet-stream"
-                let attachmentToken = attach.attachmentDataRef?.attachmentUploadToken
-                    ?? attachmentToken(from: attach.downloadUri)
-                    ?? attachmentToken(from: attach.thumbnailUri)
-                return Attachment(
-                    name: contentName,
-                    url: attach.downloadUri.flatMap { URL(string: $0) },
-                    mimeType: contentType,
-                    size: 0,
-                    thumbnailURL: attach.thumbnailUri.flatMap { URL(string: $0) },
-                    resourceName: attach.attachmentDataRef?.resourceName ?? attach.name,
-                    uploadToken: attachmentToken
-                )
-            } ?? []
-            
-            guard !text.isEmpty || !attachments.isEmpty else { return nil }
+            let attachments: [Attachment] = msg.attachment?.map(makeAttachment) ?? []
 
-            let quotedMessage = msg.quotedMessageMetadata?.name
-                .flatMap { name -> QuotedMessage? in
-                    guard !name.isEmpty else { return nil }
-                    return QuotedMessage(messageId: name, authorName: nil, text: nil)
+            // A forwarded message keeps its payload in `quotedMessageMetadata`
+            // instead of the top-level `text`/`attachment` fields. Parse that
+            // snapshot before deciding whether the row has anything to show.
+            var quotedMessage: QuotedMessage?
+            var forwardedMessage: ForwardedMessage?
+            if let metadata = msg.quotedMessageMetadata {
+                let snapshot = metadata.quotedMessageSnapshot
+                let snapshotAuthor = trimmedName(snapshot?.sender)
+                let snapshotText = nonEmptyText(snapshot?.text)
+                let snapshotAttachments = snapshot?.attachments?.map(makeAttachment) ?? []
+
+                let quoteType = metadata.quoteType?.uppercased()
+                let isForward = quoteType == "FORWARD"
+                    || (quoteType == nil && metadata.forwardedMetadata != nil)
+
+                if isForward {
+                    forwardedMessage = ForwardedMessage(
+                        sourceMessageId: trimmedName(metadata.name),
+                        authorName: snapshotAuthor,
+                        text: snapshotText,
+                        formattedText: nonEmptyText(snapshot?.formattedText),
+                        attachments: snapshotAttachments,
+                        sourceSpaceId: trimmedName(metadata.forwardedMetadata?.space),
+                        sourceSpaceName: trimmedName(metadata.forwardedMetadata?.spaceDisplayName),
+                        lastUpdateTime: metadata.lastUpdateTime
+                    )
+                } else if let name = trimmedName(metadata.name) {
+                    // `quotedMessageSnapshot` is also populated for ordinary
+                    // replies. Keep it as a fallback so a quote still renders
+                    // after the original scrolls out of the loaded window.
+                    quotedMessage = QuotedMessage(
+                        messageId: name,
+                        authorName: snapshotAuthor,
+                        text: snapshotText
+                    )
                 }
+            }
+
+            guard !text.isEmpty || !attachments.isEmpty || forwardedMessage != nil else { return nil }
 
             return Message(
                 id: msg.name,
@@ -361,6 +428,7 @@ class GoogleChatService {
                 attachments: attachments,
                 senderId: isFromMe ? nil : senderId,
                 quotedMessage: quotedMessage,
+                forwardedMessage: forwardedMessage,
                 lastUpdateTime: msg.lastUpdateTime ?? msg.createTime,
                 threadName: msg.thread?.name,
                 threadKey: msg.thread?.threadKey,

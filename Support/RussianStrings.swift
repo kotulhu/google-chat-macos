@@ -135,6 +135,8 @@ public enum RussianStrings {
         "quote.original": "Сообщение",
         "quote.remove": "Убрать цитату",
         "quote.jump": "Перейти к цитируемому сообщению",
+        "forward.title": "Пересланное сообщение",
+        "forward.from": "Из: %@",
         "more.reactions": "Другие реакции...",
 
         // Треды

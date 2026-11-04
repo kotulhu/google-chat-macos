@@ -65,6 +65,24 @@ class ChatViewModel: NSObject,ObservableObject {
     private var peopleSearchPrepared = false
     private var reactionCache: [String: [MessageReaction]] = [:]
     private var loadingReactionMessageIds = Set<String>()
+    /// Bumped whenever the current user's reaction is changed locally. A
+    /// reaction GET that started before the change must not overwrite the
+    /// newer local state when it finally returns.
+    private var reactionMutationRevision: [String: Int] = [:]
+    /// Messages with an in-flight add/remove request. While a toggle is in
+    /// flight a background refresh could otherwise apply an older server
+    /// snapshot over the optimistic state.
+    private var togglingReactionMessageIds = Set<String>()
+    /// Short window after a toggle during which reaction GETs are ignored.
+    /// The API can serve a snapshot from before the write for a moment, and
+    /// applying it would make the user's own reaction vanish again.
+    private var reactionMutationGraceUntil: [String: Date] = [:]
+    /// Per-space request counter for `loadMessages`. Only the newest request
+    /// may assign the feed, so a slow poll cannot overwrite a newer one.
+    private var messageLoadGeneration: [String: Int] = [:]
+    /// Space the current `messages` array belongs to. Used to decide whether
+    /// the disk cache may replace the in-memory feed.
+    private var messagesSpaceId: String?
 
     let nameResolver = NameResolver()
     private var nameResolverSubscription: AnyCancellable?
@@ -130,6 +148,7 @@ class ChatViewModel: NSObject,ObservableObject {
             currentUserId = peopleId.replacingOccurrences(of: "people/", with: "users/")
             chatService?.updateCurrentUser(id: currentUserId)
             print("✅ Current user ID: \(currentUserId)")
+            recomputeReactionOwnership()
         } catch {
             print("❌ Failed to get current user ID: \(error)")
         }
@@ -159,6 +178,7 @@ class ChatViewModel: NSObject,ObservableObject {
             currentUserId = currentUserId.replacingOccurrences(of: "people/", with: "users/")
             chatService?.updateCurrentUser(id: currentUserId)
             print("✅ Current user ID: \(currentUserId)")
+            recomputeReactionOwnership()
         } catch {
             print("❌ Failed to get ID: \(error)")
         }
@@ -482,25 +502,58 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Loads the messages of a space (cache first, then network), assigns
     /// resolved author names and reactions, updates the space timestamp, and
     /// re-sorts the list when a newer message arrived.
+    ///
+    /// The feed is merged by message id instead of being replaced with the
+    /// newest page. Reactions live outside the `/messages` payload and are
+    /// loaded lazily, so replacing the array from the API or the disk cache
+    /// would silently drop every reaction that arrived since the last poll.
     func loadMessages(for space: ChatSpace) async {
         PerfBeacon.start("Lenta", phase: "loadMessages")
-        guard let service = chatService else { return }
+        guard let service = chatService, selectedSpace?.id == space.id else { return }
+
+        let generation = (messageLoadGeneration[space.id] ?? 0) + 1
+        messageLoadGeneration[space.id] = generation
         isLoading = true
-        defer { isLoading = false }
-        
-        PerfBeacon.start("Lenta", phase: "cacheRead")
-        let cachedMessages = MessageCache.shared.get(spaceId: space.id)
-        PerfBeacon.end("Lenta", phase: "cacheRead", detail: "count=\(cachedMessages?.count ?? 0)")
-        if let cachedMessages, !cachedMessages.isEmpty {
-            for message in cachedMessages where !message.reactions.isEmpty {
-                reactionCache[message.id] = message.reactions
+        defer {
+            if messageLoadGeneration[space.id] == generation {
+                isLoading = false
             }
-            self.messages = normalizeMessagesForDisplay(cachedMessages)
         }
-        
+        var cachedMessages: [Message]?
+
+        // The on-disk snapshot may already be older than reactions loaded
+        // since the previous poll. It is only safe to hydrate the feed from it
+        // when the live feed for this space is not loaded yet (app launch or a
+        // space switch); a normal poll keeps the in-memory messages.
+        let isSameSpaceFeed = messagesSpaceId == space.id && !messages.isEmpty
+        if !isSameSpaceFeed {
+            PerfBeacon.start("Lenta", phase: "cacheRead")
+            cachedMessages = MessageCache.shared.get(spaceId: space.id)
+            PerfBeacon.end("Lenta", phase: "cacheRead", detail: "count=\(cachedMessages?.count ?? 0)")
+            if let cachedMessages, !cachedMessages.isEmpty {
+                for message in cachedMessages where !message.reactions.isEmpty {
+                    // Never let an older disk copy replace a newer in-memory
+                    // reaction list (e.g. after an optimistic toggle).
+                    if reactionCache[message.id] == nil {
+                        reactionCache[message.id] = message.reactions
+                    }
+                }
+                self.messages = normalizeMessagesForDisplay(
+                    cachedMessages.map(messageWithCurrentReactions)
+                )
+            } else {
+                self.messages = []
+            }
+            messagesSpaceId = space.id
+        }
+
         do {
             PerfBeacon.start("Lenta", phase: "fetch")
             let page = try await service.fetchMessages(spaceId: space.id)
+            guard messageLoadGeneration[space.id] == generation,
+                  selectedSpace?.id == space.id else {
+                return
+            }
             let fetchedMessages = page.messages
             messagesPageToken = page.nextPageToken
             hasMoreMessages = page.nextPageToken != nil
@@ -508,14 +561,14 @@ class ChatViewModel: NSObject,ObservableObject {
             MessageHistoryStore.shared.upsertMessages(page.history)
             PerfBeacon.end("Lenta", phase: "fetch", detail: "count=\(fetchedMessages.count)")
             accessToken = service.currentAccessToken
-            
+
             if space.type == .direct {
                 await refreshDirectChatMappingAndName(for: space)
             }
-            
+
             let senderIds = Set(fetchedMessages.compactMap { $0.senderId }.filter { !$0.isEmpty })
             await nameResolver.resolve(userIds: senderIds)
-            
+
             PerfBeacon.start("Lenta", phase: "buildNames")
             var messagesWithNames: [Message] = []
             for var msg in fetchedMessages {
@@ -524,13 +577,15 @@ class ChatViewModel: NSObject,ObservableObject {
                 } else {
                     msg.authorName = currentUserDisplayName
                 }
-                if let cachedReactions = reactionCache[msg.id] {
-                    msg.reactions = cachedReactions
-                }
                 messagesWithNames.append(msg)
             }
             PerfBeacon.end("Lenta", phase: "buildNames", detail: "count=\(messagesWithNames.count)")
-            let changed = self.messages != messagesWithNames
+
+            // Merge now and again right before assigning: a reaction load may
+            // finish during `syncIncomingState`, and that newer state must be
+            // the one that survives.
+            let preview = mergeFetchedMessages(messagesWithNames, into: self.messages)
+            let changed = self.messages != preview
 
             // The open chat reacts to new arrivals immediately; the 30-second
             // background refresh covers everything else. Both go through the
@@ -540,6 +595,10 @@ class ChatViewModel: NSObject,ObservableObject {
             let previousTimestamp = spaces.first(where: { $0.id == space.id })?.lastMessageTimestamp
             await syncIncomingState(messagesWithNames, for: space.id,
                                     notify: changed && lastLoadedSpaceId == space.id)
+            guard messageLoadGeneration[space.id] == generation,
+                  selectedSpace?.id == space.id else {
+                return
+            }
             if let idx = spaces.firstIndex(where: { $0.id == space.id }),
                let now = spaces[idx].lastMessageTimestamp,
                now > (previousTimestamp ?? .distantPast) {
@@ -553,25 +612,60 @@ class ChatViewModel: NSObject,ObservableObject {
                 resetThreadState()
             }
 
+            let merged = mergeFetchedMessages(messagesWithNames, into: self.messages)
+            let mergedChanged = self.messages != merged
             PerfBeacon.start("Lenta", phase: "assign")
-            if changed {
-                self.messages = messagesWithNames
+            if mergedChanged {
+                self.messages = merged
             }
-            PerfBeacon.end("Lenta", phase: "assign", detail: "changed=\(changed)")
+            messagesSpaceId = space.id
+            PerfBeacon.end("Lenta", phase: "assign", detail: "changed=\(mergedChanged)")
             PerfBeacon.start("Lenta", phase: "cacheWrite")
-            MessageCache.shared.set(messagesWithNames, forSpaceId: space.id)
-            PerfBeacon.end("Lenta", phase: "cacheWrite", detail: "count=\(messagesWithNames.count)")
-            
+            MessageCache.shared.set(merged, forSpaceId: space.id)
+            PerfBeacon.end("Lenta", phase: "cacheWrite", detail: "count=\(merged.count)")
+
         } catch {
-            if cachedMessages?.isEmpty != false {
+            if messages.isEmpty {
                 errorMessage = L.str("err.load.messages", error.localizedDescription)
                 print("❌ \(errorMessage!)")
             } else {
-                print("⚠️ Could not refresh messages from network, showing cache: \(error)")
+                print("⚠️ Could not refresh messages from network, keeping the live feed: \(error)")
             }
         }
+        guard messageLoadGeneration[space.id] == generation,
+              selectedSpace?.id == space.id else { return }
         await ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
         PerfBeacon.end("Lenta", phase: "loadMessages", detail: space.name)
+    }
+
+    /// Applies the newest known reaction list to a message. `reactionCache` is
+    /// authoritative because `applyReactions` updates it alongside the UI.
+    private func messageWithCurrentReactions(_ message: Message) -> Message {
+        guard let reactions = reactionCache[message.id] else { return message }
+        var copy = message
+        copy.reactions = reactions
+        return copy
+    }
+
+    /// Combines a fresh newest page with the already loaded feed by message
+    /// id. Older pages are kept, deleted messages are dropped when they fall
+    /// inside the refreshed window, and the latest reaction cache is applied
+    /// last so a poll cannot erase a reaction loaded a moment earlier.
+    private func mergeFetchedMessages(_ fetched: [Message], into current: [Message]) -> [Message] {
+        let fetchedIDs = Set(fetched.map(\.id))
+        let oldestFetched = fetched.map(\.timestamp).min()
+
+        var older: [Message] = []
+        if let oldestFetched {
+            older = current.filter { message in
+                !fetchedIDs.contains(message.id) && message.timestamp < oldestFetched
+            }
+        }
+
+        var seen = Set<String>()
+        return (fetched + older)
+            .filter { seen.insert($0.id).inserted }
+            .map(messageWithCurrentReactions)
     }
 
     /// Loads one more page of older messages and appends it to the feed.
@@ -610,11 +704,17 @@ class ChatViewModel: NSObject,ObservableObject {
                 }
             }
             
-            messages.append(contentsOf: older)
+            // A poll may have merged some of these messages while names were
+            // resolving, so de-duplicate against the current feed again.
+            var seen = Set(messages.map(\.id))
+            let unique = older
+                .filter { seen.insert($0.id).inserted }
+                .map(messageWithCurrentReactions)
+            messages.append(contentsOf: unique)
             messagesPageToken = page.nextPageToken
             hasMoreMessages = page.nextPageToken != nil
             await ArchiveStore.shared.merge(spaceId: space.id, spaceName: space.name, messages: messages)
-            PerfBeacon.mark("Lenta", phase: "loadPrevious", detail: "added=\(older.count), total=\(messages.count)")
+            PerfBeacon.mark("Lenta", phase: "loadPrevious", detail: "added=\(unique.count), total=\(messages.count)")
         } catch {
             guard !isCancellation(error) else { return }
             print("❌ Failed to load previous messages: \(error)")
@@ -638,7 +738,13 @@ class ChatViewModel: NSObject,ObservableObject {
                 timestamp: message.timestamp,
                 attachments: message.attachments,
                 senderId: nil,
-                reactions: message.reactions
+                reactions: message.reactions,
+                quotedMessage: message.quotedMessage,
+                forwardedMessage: message.forwardedMessage,
+                lastUpdateTime: message.lastUpdateTime,
+                threadName: message.threadName,
+                threadKey: message.threadKey,
+                isThreadReply: message.isThreadReply
             )
         }
     }
@@ -677,6 +783,11 @@ class ChatViewModel: NSObject,ObservableObject {
         directChatUserMapping.removeAll()
         reactionCache.removeAll()
         loadingReactionMessageIds.removeAll()
+        reactionMutationRevision.removeAll()
+        togglingReactionMessageIds.removeAll()
+        reactionMutationGraceUntil.removeAll()
+        messageLoadGeneration.removeAll()
+        messagesSpaceId = nil
         nameResolver.clearCache()
         nameResolverSubscription?.cancel()
         updateDockBadge()
@@ -1178,6 +1289,10 @@ class ChatViewModel: NSObject,ObservableObject {
 
     /// Loads reactions for a message (unless cached, or unless `force` is set),
     /// then applies them to the display list.
+    ///
+    /// A response is only applied when no local mutation happened while the
+    /// request was in flight. Otherwise a slow GET (or a forced viewport
+    /// refresh) could overwrite a reaction the user just added or removed.
     func loadReactions(for messageId: String, force: Bool = false) async {
         if !force, let cached = reactionCache[messageId] {
             applyReactions(cached, to: messageId)
@@ -1186,15 +1301,21 @@ class ChatViewModel: NSObject,ObservableObject {
         guard !loadingReactionMessageIds.contains(messageId), let service = chatService else {
             return
         }
-        
+
+        let revision = reactionMutationRevision[messageId] ?? 0
         loadingReactionMessageIds.insert(messageId)
         defer { loadingReactionMessageIds.remove(messageId) }
-        
+
         PerfBeacon.start("React", phase: force ? "loadReactions(force)" : "loadReactions")
         do {
             let reactions = try await service.fetchReactions(messageId: messageId)
             PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "count=\(reactions.count), message=\(messageId.suffix(12))")
-            reactionCache[messageId] = reactions
+            guard reactionMutationRevision[messageId] == revision,
+                  !togglingReactionMessageIds.contains(messageId),
+                  Date() >= (reactionMutationGraceUntil[messageId] ?? .distantPast) else {
+                // A newer local state exists; this snapshot is stale.
+                return
+            }
             applyReactions(reactions, to: messageId)
         } catch {
             PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "ERROR")
@@ -1205,45 +1326,78 @@ class ChatViewModel: NSObject,ObservableObject {
         }
     }
 
-    /// Optimistically toggles the current user's reaction on a message, then
-    /// reconciles with the server state, restoring the old state on failure.
-    func toggleReaction(messageId: String, emoji: String) async {
-        guard let service = chatService,
-              let index = messages.firstIndex(where: { $0.id == messageId }) else {
-            return
+    /// Invalidates reaction GETs that started before a local mutation.
+    private func beginReactionMutation(for messageId: String) -> Int {
+        let next = (reactionMutationRevision[messageId] ?? 0) + 1
+        reactionMutationRevision[messageId] = next
+        return next
+    }
+
+    /// Ends a mutation, invalidating any GET that overlapped it even when that
+    /// GET returns after this method.
+    private func finishReactionMutation(for messageId: String, revision: Int) {
+        if reactionMutationRevision[messageId] == revision {
+            reactionMutationRevision[messageId] = revision + 1
         }
-        
-        let oldReactions = messages[index].reactions
+        reactionMutationGraceUntil[messageId] = Date().addingTimeInterval(2)
+        togglingReactionMessageIds.remove(messageId)
+    }
+
+    /// Optimistically toggles the current user's reaction on a message, then
+    /// reconciles with the operation response, restoring the old state on
+    /// failure.
+    ///
+    /// No follow-up GET is made: the Chat API is eventually consistent, so an
+    /// immediate read can legitimately return the state from before the write
+    /// and make the user's own reaction disappear.
+    func toggleReaction(messageId: String, emoji: String) async {
+        guard let service = chatService else { return }
+        let messageExists = messages.contains(where: { $0.id == messageId })
+            || threadReplies.values.contains(where: { replies in
+                replies.contains(where: { $0.id == messageId })
+            })
+        guard messageExists else { return }
+        // A second tap while the first request is in flight would race the
+        // server and the revision guard, so it is ignored.
+        guard !togglingReactionMessageIds.contains(messageId) else { return }
+
+        let oldReactions = currentReactions(for: messageId)
         let hasMyReaction = oldReactions.first { $0.emoji == emoji && $0.isMine }
+        let revision = beginReactionMutation(for: messageId)
+        togglingReactionMessageIds.insert(messageId)
+        defer { finishReactionMutation(for: messageId, revision: revision) }
         applyReactions(toggledReactions(oldReactions, emoji: emoji), to: messageId)
-        
+
         do {
+            let updated: [MessageReaction]
             if let reactionName = hasMyReaction?.myReactionName {
                 try await service.removeReaction(reactionId: reactionName)
+                updated = reactionsByRemovingMyReaction(currentReactions(for: messageId), emoji: emoji)
             } else if hasMyReaction != nil {
+                // Own reaction is known but its resource name is missing (an
+                // optimistic add from an earlier session). Resolve the name
+                // once, then delete it.
                 let freshReactions = try await service.fetchReactions(messageId: messageId)
-                reactionCache[messageId] = freshReactions
+                guard reactionMutationRevision[messageId] == revision else { return }
                 guard let reactionName = freshReactions.first(where: { $0.emoji == emoji && $0.isMine })?.myReactionName else {
                     applyReactions(freshReactions, to: messageId)
                     return
                 }
                 try await service.removeReaction(reactionId: reactionName)
+                updated = reactionsByRemovingMyReaction(currentReactions(for: messageId), emoji: emoji)
             } else {
-                _ = try await service.addReaction(messageId: messageId, emoji: emoji)
+                let added = try await service.addReaction(messageId: messageId, emoji: emoji)
+                updated = reactionsByAddingMyReaction(currentReactions(for: messageId), added: added, emoji: emoji)
                 ReactionHistoryStore.shared.record(emoji)
             }
-            
-            let reactions = try await service.fetchReactions(messageId: messageId)
-            reactionCache[messageId] = reactions
-            applyReactions(reactions, to: messageId)
+
+            guard reactionMutationRevision[messageId] == revision else { return }
+            applyReactions(updated, to: messageId)
         } catch {
-            guard !isCancellation(error) else {
-                reactionCache[messageId] = oldReactions
-                applyReactions(oldReactions, to: messageId)
-                return
+            guard reactionMutationRevision[messageId] == revision else { return }
+            if !isCancellation(error) {
+                print("❌ Failed to toggle reaction \(emoji) for \(messageId): \(error)")
             }
-            print("❌ Failed to toggle reaction \(emoji) for \(messageId): \(error)")
-            reactionCache[messageId] = oldReactions
             applyReactions(oldReactions, to: messageId)
         }
     }
@@ -1354,20 +1508,101 @@ class ChatViewModel: NSObject,ObservableObject {
     }
 
     /// Mutates the in-memory reactions of a message and notifies observers.
+    ///
+    /// A message may exist twice: in the top-level feed and in an expanded
+    /// thread's reply list. Both copies must be updated, otherwise a reaction
+    /// loaded for an older reply is cached but never rendered.
     private func applyReactions(_ reactions: [MessageReaction], to messageId: String) {
-        reactionCache[messageId] = reactions
+        let normalized = normalizedReactionOwnership(reactions)
+        reactionCache[messageId] = normalized
+
+        var updatedMessage: Message?
         if let index = messages.firstIndex(where: { $0.id == messageId }) {
-            PerfBeacon.measure("React", phase: "applyReactions", minMs: 1, detail: "count=\(reactions.count)") {
-                messages[index].reactions = reactions
-                objectWillChange.send()
+            PerfBeacon.measure("React", phase: "applyReactions", minMs: 1, detail: "count=\(normalized.count)") {
+                messages[index].reactions = normalized
             }
-            if let space = selectedSpace, index < messages.count {
-                let message = messages[index]
-                Task {
-                    await ArchiveStore.shared.mergeMessage(spaceId: space.id, message: message)
-                }
+            updatedMessage = messages[index]
+        }
+
+        for name in Array(threadReplies.keys) {
+            guard var replies = threadReplies[name],
+                  let index = replies.firstIndex(where: { $0.id == messageId }) else { continue }
+            replies[index].reactions = normalized
+            threadReplies[name] = replies
+            updatedMessage = replies[index]
+        }
+
+        if updatedMessage != nil {
+            objectWillChange.send()
+        }
+
+        if let space = selectedSpace, let message = updatedMessage {
+            Task {
+                await ArchiveStore.shared.mergeMessage(spaceId: space.id, message: message)
             }
         }
+    }
+
+    /// Re-evaluates `isMine` / `myReactionName` once the current user id is
+    /// known. Reactions are aggregated asynchronously and may be fetched before
+    /// `setCurrentUserId` finishes, which would leave the user's own chips
+    /// unhighlighted and make `toggleReaction` treat them as foreign.
+    private func recomputeReactionOwnership() {
+        guard !currentUserId.isEmpty else { return }
+        for (messageId, reactions) in reactionCache {
+            let normalized = normalizedReactionOwnership(reactions)
+            if normalized != reactions {
+                applyReactions(normalized, to: messageId)
+            }
+        }
+    }
+
+    /// Marks reactions that belong to the current user and migrates the
+    /// optimistic `users/me` sentinel to the real user id.
+    private func normalizedReactionOwnership(_ reactions: [MessageReaction]) -> [MessageReaction] {
+        let userId = currentUserId
+        guard !userId.isEmpty else { return reactions }
+
+        var changed = false
+        let result: [MessageReaction] = reactions.map { reaction in
+            var copy = reaction
+            let serverName = reaction.reactionNamesByUserId[userId]
+                ?? reaction.reactionNamesByUserId["users/me"]
+            let isMine = reaction.isMine
+                || serverName != nil
+                || reaction.userIds.contains(userId)
+                || reaction.userIds.contains("users/me")
+
+            if copy.isMine != isMine {
+                copy.isMine = isMine
+                changed = true
+            }
+
+            if isMine {
+                if copy.myReactionName == nil, let serverName {
+                    copy.myReactionName = serverName
+                    changed = true
+                }
+                if copy.userIds.contains("users/me") {
+                    copy.userIds.removeAll { $0 == "users/me" }
+                    if !copy.userIds.contains(userId) {
+                        copy.userIds.append(userId)
+                        copy.userIds.sort()
+                    }
+                    changed = true
+                }
+                if let sentinelName = copy.reactionNamesByUserId.removeValue(forKey: "users/me") {
+                    copy.reactionNamesByUserId[userId] = sentinelName
+                    changed = true
+                }
+            } else if copy.myReactionName != nil {
+                copy.myReactionName = nil
+                changed = true
+            }
+
+            return copy
+        }
+        return changed ? result : reactions
     }
 
     /// Computes the resulting reaction list after the current user toggles an
@@ -1401,12 +1636,92 @@ class ChatViewModel: NSObject,ObservableObject {
                 myReactionName: nil
             ))
         }
-        return result.sorted { lhs, rhs in
+        return sortedReactions(result)
+    }
+
+    /// Applies a successful `addReaction` response to the locally known list.
+    /// Only the current user's entry is merged, so reactions added by others
+    /// since the last refresh are preserved.
+    private func reactionsByAddingMyReaction(
+        _ reactions: [MessageReaction],
+        added: MessageReaction,
+        emoji: String
+    ) -> [MessageReaction] {
+        let myId = currentUserId.isEmpty ? "users/me" : currentUserId
+        var result = reactions
+        if let index = result.firstIndex(where: { $0.emoji == emoji }) {
+            result[index].isMine = true
+            if let name = added.myReactionName {
+                result[index].myReactionName = name
+                result[index].reactionNamesByUserId[myId] = name
+            }
+            if !result[index].userIds.contains(myId) {
+                result[index].userIds.append(myId)
+                result[index].userIds.sort()
+            }
+        } else {
+            var userIds = added.userIds
+            if userIds.isEmpty { userIds = [myId] }
+            var names = added.reactionNamesByUserId
+            if let name = added.myReactionName { names[myId] = name }
+            result.append(MessageReaction(
+                emoji: emoji,
+                userIds: userIds,
+                reactionNamesByUserId: names,
+                isMine: true,
+                myReactionName: added.myReactionName
+            ))
+        }
+        return sortedReactions(result)
+    }
+
+    /// Applies a successful `removeReaction` to the locally known list without
+    /// asking the server again (a fresh GET can still return the pre-delete
+    /// snapshot because of eventual consistency).
+    private func reactionsByRemovingMyReaction(
+        _ reactions: [MessageReaction],
+        emoji: String
+    ) -> [MessageReaction] {
+        let myId = currentUserId
+        var result = reactions
+        guard let index = result.firstIndex(where: { $0.emoji == emoji }) else {
+            return reactions
+        }
+        result[index].isMine = false
+        result[index].myReactionName = nil
+        result[index].userIds.removeAll { $0 == "users/me" || (!myId.isEmpty && $0 == myId) }
+        if !myId.isEmpty {
+            result[index].reactionNamesByUserId.removeValue(forKey: myId)
+        }
+        result[index].reactionNamesByUserId.removeValue(forKey: "users/me")
+        if result[index].userIds.isEmpty {
+            result.remove(at: index)
+        }
+        return sortedReactions(result)
+    }
+
+    private func sortedReactions(_ reactions: [MessageReaction]) -> [MessageReaction] {
+        reactions.sorted { lhs, rhs in
             if lhs.count == rhs.count {
                 return lhs.emoji < rhs.emoji
             }
             return lhs.count > rhs.count
         }
+    }
+
+    /// The newest locally known reactions for a message, whether it lives in
+    /// the feed, in an expanded thread, or only in the reaction cache.
+    private func currentReactions(for messageId: String) -> [MessageReaction] {
+        if let cached = reactionCache[messageId] { return cached }
+        if let message = messages.first(where: { $0.id == messageId }) {
+            return message.reactions
+        }
+        for replies in threadReplies.values {
+            if let reply = replies.first(where: { $0.id == messageId }) {
+                return reply.reactions
+            }
+        }
+        return []
     }
 
     /// Whether an error represents a cancelled task or URL request.
@@ -1762,7 +2077,15 @@ class ChatViewModel: NSObject,ObservableObject {
 
         NSSound.beep()
         let author = message.authorName
-        let body = "\(author): \(message.text)"
+        let preview: String
+        if !message.text.isEmpty {
+            preview = message.text
+        } else if let forwarded = message.forwardedMessage {
+            preview = forwarded.text ?? L.str("forward.title")
+        } else {
+            preview = ""
+        }
+        let body = preview.isEmpty ? author : "\(author): \(preview)"
         Task { await LocalNotifier.post(title: space.name, body: body, spaceId: space.id) }
     }
     

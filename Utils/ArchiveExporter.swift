@@ -71,7 +71,9 @@ enum ArchiveExporter {
             // can point at a file that actually exists.
             var resolved: [String: String?] = [:]
             for item in chunk {
-                for attachment in item.message.attachments {
+                let attachments = item.message.attachments
+                    + (item.message.forwardedMessage?.attachments ?? [])
+                for attachment in attachments {
                     if resolved[attachment.id] != nil { continue }
                     resolved[attachment.id] = await ensureAttachment(
                         attachment,
@@ -226,6 +228,29 @@ enum ArchiveExporter {
         let message = item.message
         var inner = ""
         inner += "<div class=\"msg-head\"><span class=\"author state-\(message.isFromMe ? "mine" : "theirs")\">\(escapeHTML(message.authorName))</span><span class=\"time\">\(escapeHTML(timestampFormatter().string(from: message.timestamp)))</span></div>"
+
+        if let forwarded = message.forwardedMessage {
+            var header = L.str("forward.title")
+            if let source = forwarded.sourceSpaceName, !source.isEmpty {
+                header += " · " + L.str("forward.from", source)
+            }
+            var forward = "<blockquote class=\"quote forward\"><span class=\"qsrc\">\(escapeHTML(header))</span>"
+            if let author = forwarded.authorName, !author.isEmpty {
+                forward += "<p class=\"fwd-author\">\(escapeHTML(author))</p>"
+            }
+            if let text = forwarded.text, !text.isEmpty {
+                forward += "<p>\(linkifiedHTML(text))</p>"
+            }
+            if !forwarded.attachments.isEmpty {
+                forward += "<div class=\"attachments\">"
+                for attachment in forwarded.attachments {
+                    forward += renderAttachment(attachment, storedName: resolved[attachment.id] ?? nil)
+                }
+                forward += "</div>"
+            }
+            forward += "</blockquote>"
+            inner += forward
+        }
 
         if let quote = message.quotedMessage, !quote.messageId.isEmpty {
             let sayer = quote.authorName ?? L.str("export.doc.quote")
@@ -419,6 +444,9 @@ enum ArchiveExporter {
                            border-left: 3px solid var(--accent); border-radius: 6px; }
         blockquote.quote .qsrc { display: block; font-size: 12px; font-weight: 600; color: var(--muted); }
         blockquote.quote p { margin: 2px 0 0; color: var(--muted); overflow-wrap: break-word; }
+        blockquote.quote.forward p { color: var(--fg); }
+        blockquote.quote.forward .fwd-author { font-weight: 600; margin: 4px 0 2px; }
+        blockquote.quote.forward .attachments { margin-top: 8px; }
         .attachments { margin-top: 8px; }
         .attachment { margin: 8px 0; }
         figure.attachment { margin: 0 0 12px; }

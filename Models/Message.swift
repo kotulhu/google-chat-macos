@@ -52,6 +52,81 @@ struct QuotedMessage: Equatable, Codable {
     var text: String?
 }
 
+/// A snapshot of a message forwarded from another conversation.
+///
+/// Google Chat does not expose a forwarded message as ordinary text — the
+/// destination message has no top-level `text` or `attachment`. The copy lives
+/// entirely in `quotedMessageMetadata.quotedMessageSnapshot`, together with the
+/// source space in `forwardedMetadata`. Keeping it separate from
+/// `QuotedMessage` matters because a quote points at a row in the current feed,
+/// while a forward may come from a space the user cannot open at all.
+struct ForwardedMessage: Equatable, Codable {
+    /// `quotedMessageMetadata.name` — the original message, not the message in
+    /// the current space. It is metadata only and must not be used as a feed
+    /// anchor.
+    let sourceMessageId: String?
+    /// `quotedMessageSnapshot.sender` — a display name, not a user resource.
+    var authorName: String?
+    /// `quotedMessageSnapshot.text` — the plain-text snapshot.
+    var text: String?
+    /// `quotedMessageSnapshot.formattedText` — Chat markup, kept for future
+    /// rich rendering. The UI currently prefers `text`.
+    var formattedText: String?
+    /// Copies of the original message's attachments. Their resource names and
+    /// download URLs already belong to the destination space.
+    var attachments: [Attachment]
+    /// `forwardedMetadata.space` — the source space resource name.
+    var sourceSpaceId: String?
+    /// `forwardedMetadata.spaceDisplayName` — a person's name for a DM, the
+    /// space name for a space, or a generated member list for a group chat.
+    var sourceSpaceName: String?
+    /// `quotedMessageMetadata.lastUpdateTime` of the original message.
+    let lastUpdateTime: String?
+
+    init(
+        sourceMessageId: String? = nil,
+        authorName: String? = nil,
+        text: String? = nil,
+        formattedText: String? = nil,
+        attachments: [Attachment] = [],
+        sourceSpaceId: String? = nil,
+        sourceSpaceName: String? = nil,
+        lastUpdateTime: String? = nil
+    ) {
+        self.sourceMessageId = sourceMessageId
+        self.authorName = authorName
+        self.text = text
+        self.formattedText = formattedText
+        self.attachments = attachments
+        self.sourceSpaceId = sourceSpaceId
+        self.sourceSpaceName = sourceSpaceName
+        self.lastUpdateTime = lastUpdateTime
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sourceMessageId = try container.decodeIfPresent(String.self, forKey: .sourceMessageId)
+        authorName = try container.decodeIfPresent(String.self, forKey: .authorName)
+        text = try container.decodeIfPresent(String.self, forKey: .text)
+        formattedText = try container.decodeIfPresent(String.self, forKey: .formattedText)
+        attachments = try container.decodeIfPresent([Attachment].self, forKey: .attachments) ?? []
+        sourceSpaceId = try container.decodeIfPresent(String.self, forKey: .sourceSpaceId)
+        sourceSpaceName = try container.decodeIfPresent(String.self, forKey: .sourceSpaceName)
+        lastUpdateTime = try container.decodeIfPresent(String.self, forKey: .lastUpdateTime)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sourceMessageId
+        case authorName
+        case text
+        case formattedText
+        case attachments
+        case sourceSpaceId
+        case sourceSpaceName
+        case lastUpdateTime
+    }
+}
+
 struct Message: Identifiable, Equatable, Codable {
     let id: String
     let text: String
@@ -62,6 +137,8 @@ struct Message: Identifiable, Equatable, Codable {
     let senderId: String?
     var reactions: [MessageReaction] = []
     var quotedMessage: QuotedMessage?
+    /// Present only for a message forwarded from another conversation.
+    var forwardedMessage: ForwardedMessage?
     /// Server-format timestamp (`createTime` fallback) sent to the API inside
     /// `quotedMessageMetadata.lastUpdateTime` when this message is quoted.
     let lastUpdateTime: String?
@@ -109,6 +186,7 @@ struct Message: Identifiable, Equatable, Codable {
         senderId: String?,
         reactions: [MessageReaction] = [],
         quotedMessage: QuotedMessage? = nil,
+        forwardedMessage: ForwardedMessage? = nil,
         lastUpdateTime: String? = nil,
         threadName: String? = nil,
         threadKey: String? = nil,
@@ -123,6 +201,7 @@ struct Message: Identifiable, Equatable, Codable {
         self.senderId = senderId
         self.reactions = reactions
         self.quotedMessage = quotedMessage
+        self.forwardedMessage = forwardedMessage
         self.lastUpdateTime = lastUpdateTime
         self.threadName = threadName
         self.threadKey = threadKey
@@ -140,6 +219,7 @@ struct Message: Identifiable, Equatable, Codable {
         senderId = try container.decodeIfPresent(String.self, forKey: .senderId)
         reactions = try container.decodeIfPresent([MessageReaction].self, forKey: .reactions) ?? []
         quotedMessage = try container.decodeIfPresent(QuotedMessage.self, forKey: .quotedMessage)
+        forwardedMessage = try container.decodeIfPresent(ForwardedMessage.self, forKey: .forwardedMessage)
         lastUpdateTime = try container.decodeIfPresent(String.self, forKey: .lastUpdateTime)
         threadName = try container.decodeIfPresent(String.self, forKey: .threadName)
         threadKey = try container.decodeIfPresent(String.self, forKey: .threadKey)
@@ -155,6 +235,7 @@ struct Message: Identifiable, Equatable, Codable {
         lhs.attachments == rhs.attachments &&
         lhs.reactions == rhs.reactions &&
         lhs.quotedMessage == rhs.quotedMessage &&
+        lhs.forwardedMessage == rhs.forwardedMessage &&
         lhs.lastUpdateTime == rhs.lastUpdateTime &&
         lhs.threadName == rhs.threadName &&
         lhs.threadKey == rhs.threadKey &&
@@ -171,6 +252,7 @@ struct Message: Identifiable, Equatable, Codable {
         case senderId
         case reactions
         case quotedMessage
+        case forwardedMessage
         case lastUpdateTime
         case threadName
         case threadKey

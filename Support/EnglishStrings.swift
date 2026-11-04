@@ -134,6 +134,8 @@ public enum EnglishStrings {
         "quote.original": "Message",
         "quote.remove": "Remove quote",
         "quote.jump": "Go to the original message",
+        "forward.title": "Forwarded message",
+        "forward.from": "From: %@",
         "more.reactions": "More reactions...",
 
         // Threads
