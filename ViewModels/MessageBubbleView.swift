@@ -46,10 +46,10 @@ struct MessageBubbleView: View {
                         let avatarURL = nameResolver.avatarURL(for: senderId) ?? memberAvatarURLs[senderId]
                         HStack(spacing: 6) {
                             AvatarImage(url: avatarURL,
-                                        name: nameResolver.displayName(for: senderId),
+                                        name: message.authorName,
                                         accessToken: accessToken)
                                 .frame(width: 20, height: 20)
-                            Button(nameResolver.displayName(for: senderId)) {
+                            Button(message.authorName) {
                                 onSenderTap?(senderId)
                             }
                             .font(feedSenderFont)
@@ -80,6 +80,11 @@ if let forwarded = message.forwardedMessage {
                     }
                     Text(attributedText)
                         .font(feedMessageFont)
+                        // Re-measure the wrapped height whenever the bubble's
+                        // width changes. Without this, after the window narrows
+                        // the text keeps the one-line height measured at the
+                        // previous, wider width, so the second line is clipped.
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(message.isFromMe ? Color.blue.opacity(0.6) : Color(NSColor.controlBackgroundColor))
