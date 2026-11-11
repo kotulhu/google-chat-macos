@@ -44,6 +44,14 @@ struct ContentView: View {
                             guard let spaceID = note.userInfo?["spaceId"] as? String else { return }
                             chatVM.openSpace(withID: spaceID)
                         }
+                        .onReceive(NotificationCenter.default.publisher(for: .dumpReactionsReport)) { _ in
+                            if let reportURL = chatVM.dumpReactionsReport() {
+                                print("📄 Reactions report saved to: \(reportURL.path)")
+                                NSSound.beep()
+                            } else {
+                                print("⚠️ Could not write reactions report (diagnostics disabled?)")
+                            }
+                        }
                 }
             case .failed(let message):
                 authErrorView(message: message)

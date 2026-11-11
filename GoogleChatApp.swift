@@ -2,6 +2,11 @@ import SwiftUI
 import GoogleSignIn
 import AppKit
 
+/// Posted when the user chooses the Debug → Dump reactions report menu item.
+extension Notification.Name {
+    static let dumpReactionsReport = Notification.Name("dumpReactionsReport")
+}
+
 @main
 struct ChatSandboxApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -40,6 +45,16 @@ struct ChatSandboxApp: App {
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
+            #if DEBUG
+            CommandGroup(after: .appSettings) {
+                Section("Debug") {
+                    Button("Dump reactions report") {
+                        NotificationCenter.default.post(name: .dumpReactionsReport, object: nil)
+                    }
+                    .keyboardShortcut("r", modifiers: [.command, .option])
+                }
+            }
+            #endif
         }
         
         Settings {

@@ -127,6 +127,20 @@ if let forwarded = message.forwardedMessage {
                         }
                     }
                     .frame(maxWidth: 260, alignment: message.isFromMe ? .trailing : .leading)
+                    .onAppear {
+                        ReactionDiagnosticsLogger.shared.log(
+                            stage: "ui",
+                            messageId: message.id,
+                            spaceId: nil,
+                            createdTime: message.timestamp,
+                            loadedVia: nil,
+                            fields: [
+                                "modelReactionCount": message.reactions.count,
+                                "displayedReactionCount": message.reactions.count,
+                                "uiMismatch": false,
+                            ]
+                        )
+                    }
                 }
                 
                 Text(formatFullDate(message.timestamp))

@@ -112,6 +112,218 @@ class ChatViewModel: NSObject,ObservableObject {
         return await self.sendScheduledMessage(message)
     }
 
+    // MARK: - Reaction diagnostics observability
+
+    /// Per-message accumulated diagnostic state, used to build the report.
+    /// Keyed by full message id.
+    private var reactionDiag: [String: ReactionDiagEntry] = [:]
+
+    /// Helper to look up (creating if needed) the diagnostic entry for a message.
+    private func diagEntry(for messageId: String, spaceId: String?, createdTime: Date?,
+                           loadedVia: String?, annotationTypes: [String: Int],
+                           hasAttachments: Bool, isOwnMessage: Bool) -> ReactionDiagEntry {
+        if let existing = reactionDiag[messageId] {
+            return existing
+        }
+        let entry = ReactionDiagEntry(
+            messageId: messageId,
+            spaceId: spaceId,
+            createdTime: createdTime,
+            loadedVia: loadedVia ?? "other",
+            annotationTypes: annotationTypes,
+            hasAttachments: hasAttachments,
+            isOwnMessage: isOwnMessage
+        )
+        reactionDiag[messageId] = entry
+        return entry
+    }
+
+    /// Log a decision checkpoint (whether reactions should be loaded for a message).
+    private func logDecision(entry: ReactionDiagEntry, decision: String, reason: String?,
+                           messageAgeSeconds: Int?) {
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "decision",
+            messageId: entry.messageId,
+            spaceId: entry.spaceId,
+            createdTime: entry.createdTime,
+            loadedVia: entry.loadedVia,
+            fields: [
+                "decision": decision,
+                "reason": reason as Any,
+                "messageAgeSeconds": messageAgeSeconds as Any,
+                "annotationTypes": entry.annotationTypes,
+                "hasAttachments": entry.hasAttachments,
+                "isOwnMessage": entry.isOwnMessage,
+            ]
+        )
+        var mutable = entry
+        mutable.decision = decision
+        mutable.skipReason = reason
+        mutable.messageAgeSeconds = messageAgeSeconds
+        reactionDiag[entry.messageId] = mutable
+    }
+
+    /// Log a summary checkpoint (emojiReactionSummaries from message payload).
+    private func logSummary(entry: ReactionDiagEntry, summaryPresent: Bool,
+                            summaries: [[String: Any]]?) {
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "summary",
+            messageId: entry.messageId,
+            spaceId: entry.spaceId,
+            createdTime: entry.createdTime,
+            loadedVia: entry.loadedVia,
+            fields: [
+                "summaryPresent": summaryPresent,
+                "summaries": summaries as Any,
+                "summary_absent": !summaryPresent,
+            ]
+        )
+        var mutable = entry
+        mutable.summaryPresent = summaryPresent
+        mutable.summaryCount = summaries?.count ?? 0
+        reactionDiag[entry.messageId] = mutable
+    }
+
+    /// Log an API checkpoint (reactions.list request/response).
+    private func logAPI(entry: ReactionDiagEntry, httpStatus: Int?, durationMs: Int,
+                        elementCount: Int, hasNextPageToken: Bool,
+                        errorCode: Int?, errorStatus: String?, retryAfter: Int?) {
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "api",
+            messageId: entry.messageId,
+            spaceId: entry.spaceId,
+            createdTime: entry.createdTime,
+            loadedVia: entry.loadedVia,
+            fields: [
+                "apiCall": "reactions.list",
+                "httpStatus": httpStatus as Any,
+                "durationMs": durationMs,
+                "elementCount": elementCount,
+                "hasNextPageToken": hasNextPageToken,
+                "errorCode": errorCode as Any,
+                "errorStatus": errorStatus as Any,
+                "retryAfter": retryAfter as Any,
+            ]
+        )
+        var mutable = entry
+        mutable.apiCalls += 1
+        mutable.apiLastElementCount = elementCount
+        mutable.apiLastErrorCode = errorCode
+        mutable.apiLastErrorStatus = errorStatus
+        reactionDiag[entry.messageId] = mutable
+    }
+
+    /// Log a parse checkpoint (individual reaction element parsing).
+    private func logParse(entry: ReactionDiagEntry, itemIndex: Int, emojiType: String,
+                          parseResult: String, failReason: String?, userIdShort: String?,
+                          dropped: Bool, dropReason: String?) {
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "parse",
+            messageId: entry.messageId,
+            spaceId: entry.spaceId,
+            createdTime: entry.createdTime,
+            loadedVia: entry.loadedVia,
+            fields: [
+                "parseItemIndex": itemIndex,
+                "emojiType": emojiType,
+                "parseResult": parseResult,
+                "failReason": failReason as Any,
+                "userIdShort": userIdShort as Any,
+                "dropped": dropped,
+                "dropReason": dropReason as Any,
+            ]
+        )
+        if dropped {
+            var mutable = entry
+            mutable.parseDroppedCount += 1
+            reactionDiag[entry.messageId] = mutable
+        }
+    }
+
+    /// Log a merge checkpoint (reactions applied to message model).
+    private func logMerge(entry: ReactionDiagEntry, action: String, countBefore: Int,
+                          countAfter: Int, overwriteWithEmpty: Bool, source: String) {
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "merge",
+            messageId: entry.messageId,
+            spaceId: entry.spaceId,
+            createdTime: entry.createdTime,
+            loadedVia: entry.loadedVia,
+            fields: [
+                "mergeAction": action,
+                "countBefore": countBefore,
+                "countAfter": countAfter,
+                "overwriteWithEmpty": overwriteWithEmpty,
+                "source": source,
+            ]
+        )
+        var mutable = entry
+        mutable.fetchedCount = countAfter
+        mutable.mergeOverwriteWithEmpty = overwriteWithEmpty
+        reactionDiag[entry.messageId] = mutable
+    }
+
+    /// Log a UI checkpoint (reactions shown in the bubble view).
+    private func logUI(entry: ReactionDiagEntry, modelCount: Int, displayedCount: Int,
+                       mismatch: Bool) {
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "ui",
+            messageId: entry.messageId,
+            spaceId: entry.spaceId,
+            createdTime: entry.createdTime,
+            loadedVia: entry.loadedVia,
+            fields: [
+                "modelReactionCount": modelCount,
+                "displayedReactionCount": displayedCount,
+                "uiMismatch": mismatch,
+            ]
+        )
+        var mutable = entry
+        mutable.displayedCount = displayedCount
+        mutable.uiMismatch = mismatch
+        reactionDiag[entry.messageId] = mutable
+    }
+
+    /// Build a report line entry for a message.
+    private func reportEntry(for messageId: String) -> (id: String, time: Date?,
+        loadedVia: String?, annotationTypes: [String: Int], summaryCount: Int,
+        fetchedCount: Int, displayedCount: Int, status: String, reason: String)? {
+        guard let entry = reactionDiag[messageId] else { return nil }
+        let status: String
+        let reason: String
+        if entry.apiLastErrorCode != nil || entry.apiLastErrorStatus != nil {
+            status = "API_ERROR"
+            reason = entry.apiLastErrorStatus ?? "api error"
+        } else if entry.decision == "skip" {
+            status = "NOT_FETCHED"
+            reason = entry.skipReason ?? "skipped"
+        } else if entry.uiMismatch {
+            status = "MISMATCH"
+            reason = "model=\(entry.fetchedCount) displayed=\(entry.displayedCount)"
+        } else if entry.fetchedCount > 0 {
+            status = "OK"
+            reason = ""
+        } else {
+            status = "NOT_FETCHED"
+            reason = "no reactions loaded"
+        }
+        return (id: entry.messageId, time: entry.createdTime, loadedVia: entry.loadedVia,
+                annotationTypes: entry.annotationTypes, summaryCount: entry.summaryCount,
+                fetchedCount: entry.fetchedCount, displayedCount: entry.displayedCount,
+                status: status, reason: reason)
+    }
+
+    /// Dump the reactions report for all tracked messages.
+    func dumpReactionsReport() -> URL? {
+        let entries = reactionDiag.values.compactMap { reportEntry(for: $0.messageId) }
+        return ReactionDiagnosticsLogger.shared.dumpReport(messages: entries)
+    }
+
+    /// Dump a redacted raw message JSON for debugging.
+    func dumpRawMessageJSON(_ raw: [String: Any], messageId: String) -> URL? {
+        ReactionDiagnosticsLogger.shared.dumpRawMessage(raw, for: messageId)
+    }
+
     override init() {
         super.init()
         
@@ -225,7 +437,7 @@ class ChatViewModel: NSObject,ObservableObject {
             }
         }
         reactionViewportController.start()
-        print("🔄 [Poll] startPolling for: \(space.name)")
+        print("🔄 [Poll] startPolling for: \(space.name)  reactions-viewport=started")
     }
 
     /// Stops the current space poll and reaction viewport tracking.
@@ -233,7 +445,7 @@ class ChatViewModel: NSObject,ObservableObject {
         pollTimer?.invalidate()
         pollTimer = nil
         reactionViewportController.stop()
-        print("🛑 Polling stopped")
+        print("🛑 Polling stopped  reactions-viewport=stopped")
     }
     
     /// Binds the view model to an access token and auth manager, builds the
@@ -641,10 +853,39 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Applies the newest known reaction list to a message. `reactionCache` is
     /// authoritative because `applyReactions` updates it alongside the UI.
     private func messageWithCurrentReactions(_ message: Message) -> Message {
-        guard let reactions = reactionCache[message.id] else { return message }
-        var copy = message
-        copy.reactions = reactions
-        return copy
+        let shortId = message.id.suffix(12)
+        if let reactions = reactionCache[message.id] {
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "merge",
+                messageId: message.id,
+                spaceId: nil,
+                createdTime: message.timestamp,
+                loadedVia: nil,
+                fields: [
+                    "source": "cache",
+                    "countBefore": message.reactions.count,
+                    "countAfter": reactions.count,
+                    "mergeAction": "apply",
+                ]
+            )
+            var copy = message
+            copy.reactions = reactions
+            return copy
+        }
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "merge",
+            messageId: message.id,
+            spaceId: nil,
+            createdTime: message.timestamp,
+            loadedVia: nil,
+            fields: [
+                "source": "cache",
+                "countBefore": message.reactions.count,
+                "countAfter": message.reactions.count,
+                "mergeAction": "miss",
+            ]
+        )
+        return message
     }
 
     /// Combines a fresh newest page with the already loaded feed by message
@@ -1279,11 +1520,33 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Notifies the reaction viewport controller that a message became visible
     /// (so lazy reaction loading can trigger).
     func markReactionViewportVisible(id: String) {
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "decision",
+            messageId: id,
+            spaceId: nil,
+            createdTime: nil,
+            loadedVia: "viewport",
+            fields: [
+                "decision": "load",
+                "reason": "viewport_visible",
+            ]
+        )
         reactionViewportController.markVisible(id: id)
     }
 
     /// Notifies the reaction viewport controller that a message left the viewport.
     func markReactionViewportHidden(id: String) {
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "decision",
+            messageId: id,
+            spaceId: nil,
+            createdTime: nil,
+            loadedVia: "viewport",
+            fields: [
+                "decision": "skip",
+                "reason": "viewport_hidden",
+            ]
+        )
         reactionViewportController.markHidden(id: id)
     }
 
@@ -1294,34 +1557,143 @@ class ChatViewModel: NSObject,ObservableObject {
     /// request was in flight. Otherwise a slow GET (or a forced viewport
     /// refresh) could overwrite a reaction the user just added or removed.
     func loadReactions(for messageId: String, force: Bool = false) async {
+        let shortId = messageId.suffix(12)
+        let startTime = Date()
+        let cachedCount = reactionCache[messageId]?.count ?? 0
         if !force, let cached = reactionCache[messageId] {
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "decision",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: force ? "poll" : "viewport",
+                fields: [
+                    "decision": "skip",
+                    "reason": "skipped_already_cached",
+                    "cachedCount": cached.count,
+                ]
+            )
             applyReactions(cached, to: messageId)
             return
         }
         guard !loadingReactionMessageIds.contains(messageId), let service = chatService else {
+            let reason: String
+            if loadingReactionMessageIds.contains(messageId) {
+                reason = "skipped_backoff"
+            } else {
+                reason = "skipped_other"
+            }
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "decision",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: force ? "poll" : "viewport",
+                fields: [
+                    "decision": "skip",
+                    "reason": reason,
+                    "loading": loadingReactionMessageIds.contains(messageId),
+                    "service": chatService != nil,
+                ]
+            )
             return
         }
 
-        let revision = reactionMutationRevision[messageId] ?? 0
+        let revision = reactionMutationRevision[messageId]
         loadingReactionMessageIds.insert(messageId)
         defer { loadingReactionMessageIds.remove(messageId) }
 
         PerfBeacon.start("React", phase: force ? "loadReactions(force)" : "loadReactions")
         do {
             let reactions = try await service.fetchReactions(messageId: messageId)
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
             PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "count=\(reactions.count), message=\(messageId.suffix(12))")
+            // Try to detect nextPageToken from the response for logging.
+            // We don't have direct access here; log what we know.
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "api",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: force ? "poll" : "viewport",
+                fields: [
+                    "httpStatus": 200 as Any,
+                    "durationMs": durationMs,
+                    "elementCount": reactions.count,
+                    "hasNextPageToken": false as Any,
+                    "errorCode": NSNull(),
+                    "errorStatus": NSNull(),
+                    "retryAfter": NSNull(),
+                ]
+            )
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "api",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: force ? "poll" : "viewport",
+                fields: [
+                    "fetchedCount": reactions.count,
+                ]
+            )
             guard reactionMutationRevision[messageId] == revision,
                   !togglingReactionMessageIds.contains(messageId),
                   Date() >= (reactionMutationGraceUntil[messageId] ?? .distantPast) else {
+                ReactionDiagnosticsLogger.shared.log(
+                    stage: "api",
+                    messageId: messageId,
+                    spaceId: nil,
+                    createdTime: nil,
+                    loadedVia: force ? "poll" : "viewport",
+                    fields: [
+                        "decision": "skip",
+                        "reason": "stale_response",
+                        "revision": revision as Any,
+                        "currentRevision": reactionMutationRevision[messageId] as Any,
+                    ]
+                )
                 // A newer local state exists; this snapshot is stale.
                 return
             }
             applyReactions(reactions, to: messageId)
         } catch {
-            PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "ERROR")
-            guard !isCancellation(error) else {
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            let nsError = error as NSError
+            let httpStatus: Int? = nsError.userInfo["NSHTTPURLResponseStatusCodeKey"] as? Int
+            let errorStatus: String? = nsError.localizedFailureReason ?? nsError.localizedDescription
+            let retryAfter: Int? = nil
+            if nsError.code == NSURLErrorCancelled {
+                PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "ERROR")
+                ReactionDiagnosticsLogger.shared.log(
+                    stage: "api",
+                    messageId: messageId,
+                    spaceId: nil,
+                    createdTime: nil,
+                    loadedVia: force ? "poll" : "viewport",
+                    fields: [
+                        "durationMs": durationMs,
+                        "elementCount": 0,
+                        "errorCode": nsError.code,
+                        "errorStatus": "cancelled",
+                    ]
+                )
                 return
             }
+            PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "ERROR")
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "api",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: force ? "poll" : "viewport",
+                fields: [
+                    "durationMs": durationMs,
+                    "elementCount": 0,
+                    "errorCode": nsError.code,
+                    "errorStatus": errorStatus as Any,
+                    "retryAfter": retryAfter as Any,
+                ]
+            )
             print("❌ Failed to load reactions for \(messageId): \(error)")
         }
     }
@@ -1351,21 +1723,86 @@ class ChatViewModel: NSObject,ObservableObject {
     /// immediate read can legitimately return the state from before the write
     /// and make the user's own reaction disappear.
     func toggleReaction(messageId: String, emoji: String) async {
-        guard let service = chatService else { return }
+        let shortId = messageId.suffix(12)
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "merge",
+            messageId: messageId,
+            spaceId: nil,
+            createdTime: nil,
+            loadedVia: "edit",
+            fields: [
+                "action": "toggle",
+                "emoji": emoji,
+                "service": chatService != nil,
+            ]
+        )
+        guard let service = chatService else {
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "merge",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: "edit",
+                fields: [
+                    "action": "toggle_abort",
+                    "reason": "no_service",
+                ]
+            )
+            return
+        }
         let messageExists = messages.contains(where: { $0.id == messageId })
             || threadReplies.values.contains(where: { replies in
                 replies.contains(where: { $0.id == messageId })
             })
-        guard messageExists else { return }
+        guard messageExists else {
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "merge",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: "edit",
+                fields: [
+                    "action": "toggle_abort",
+                    "reason": "message_not_in_feed",
+                ]
+            )
+            return
+        }
         // A second tap while the first request is in flight would race the
         // server and the revision guard, so it is ignored.
-        guard !togglingReactionMessageIds.contains(messageId) else { return }
+        guard !togglingReactionMessageIds.contains(messageId) else {
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "merge",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: "edit",
+                fields: [
+                    "action": "toggle_abort",
+                    "reason": "already_toggling",
+                ]
+            )
+            return
+        }
 
         let oldReactions = currentReactions(for: messageId)
         let hasMyReaction = oldReactions.first { $0.emoji == emoji && $0.isMine }
         let revision = beginReactionMutation(for: messageId)
         togglingReactionMessageIds.insert(messageId)
         defer { finishReactionMutation(for: messageId, revision: revision) }
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "merge",
+            messageId: messageId,
+            spaceId: nil,
+            createdTime: nil,
+            loadedVia: "edit",
+            fields: [
+                "action": "toggle_optimistic",
+                "emoji": emoji,
+                "oldCount": oldReactions.count,
+                "hasMine": hasMyReaction != nil,
+            ]
+        )
         applyReactions(toggledReactions(oldReactions, emoji: emoji), to: messageId)
 
         do {
@@ -1392,12 +1829,46 @@ class ChatViewModel: NSObject,ObservableObject {
             }
 
             guard reactionMutationRevision[messageId] == revision else { return }
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "merge",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: "edit",
+                fields: [
+                    "action": "toggle_server_ok",
+                    "emoji": emoji,
+                    "newCount": updated.count,
+                ]
+            )
             applyReactions(updated, to: messageId)
         } catch {
             guard reactionMutationRevision[messageId] == revision else { return }
             if !isCancellation(error) {
-                print("❌ Failed to toggle reaction \(emoji) for \(messageId): \(error)")
+                ReactionDiagnosticsLogger.shared.log(
+                    stage: "merge",
+                    messageId: messageId,
+                    spaceId: nil,
+                    createdTime: nil,
+                    loadedVia: "edit",
+                    fields: [
+                        "action": "toggle_error",
+                        "emoji": emoji,
+                        "error": error.localizedDescription,
+                    ]
+                )
             }
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "merge",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: "edit",
+                fields: [
+                    "action": "toggle_restore_old",
+                    "emoji": emoji,
+                ]
+            )
             applyReactions(oldReactions, to: messageId)
         }
     }
@@ -1513,10 +1984,14 @@ class ChatViewModel: NSObject,ObservableObject {
     /// thread's reply list. Both copies must be updated, otherwise a reaction
     /// loaded for an older reply is cached but never rendered.
     private func applyReactions(_ reactions: [MessageReaction], to messageId: String) {
+        let shortId = messageId.suffix(12)
         let normalized = normalizedReactionOwnership(reactions)
+        let wasEmpty = reactionCache[messageId]?.isEmpty ?? true
+        let countBefore = reactionCache[messageId]?.count ?? 0
         reactionCache[messageId] = normalized
 
         var updatedMessage: Message?
+        let foundInFeed = messages.contains(where: { $0.id == messageId })
         if let index = messages.firstIndex(where: { $0.id == messageId }) {
             PerfBeacon.measure("React", phase: "applyReactions", minMs: 1, detail: "count=\(normalized.count)") {
                 messages[index].reactions = normalized
@@ -1524,13 +1999,33 @@ class ChatViewModel: NSObject,ObservableObject {
             updatedMessage = messages[index]
         }
 
+        var foundInThreads = 0
         for name in Array(threadReplies.keys) {
             guard var replies = threadReplies[name],
                   let index = replies.firstIndex(where: { $0.id == messageId }) else { continue }
             replies[index].reactions = normalized
             threadReplies[name] = replies
             updatedMessage = replies[index]
+            foundInThreads += 1
         }
+
+        let overwriteWithEmpty = !wasEmpty && normalized.isEmpty
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "merge",
+            messageId: messageId,
+            spaceId: nil,
+            createdTime: nil,
+            loadedVia: nil,
+            fields: [
+                "mergeAction": overwriteWithEmpty ? "overwrite_empty" : "replace",
+                "countBefore": countBefore,
+                "countAfter": normalized.count,
+                "overwriteWithEmpty": overwriteWithEmpty,
+                "feed": foundInFeed,
+                "threads": foundInThreads,
+                "notify": updatedMessage != nil,
+            ]
+        )
 
         if updatedMessage != nil {
             objectWillChange.send()
@@ -1549,11 +2044,27 @@ class ChatViewModel: NSObject,ObservableObject {
     /// unhighlighted and make `toggleReaction` treat them as foreign.
     private func recomputeReactionOwnership() {
         guard !currentUserId.isEmpty else { return }
+        var changed = 0
         for (messageId, reactions) in reactionCache {
             let normalized = normalizedReactionOwnership(reactions)
             if normalized != reactions {
                 applyReactions(normalized, to: messageId)
+                changed += 1
             }
+        }
+        if changed > 0 {
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "merge",
+                messageId: nil,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: nil,
+                fields: [
+                    "action": "ownership_recompute",
+                    "updated": changed,
+                    "cached": reactionCache.count,
+                ]
+            )
         }
     }
 
@@ -2295,6 +2806,33 @@ class ChatViewModel: NSObject,ObservableObject {
     /// latches it for the session so the launch path cannot post a duplicate.
     func sendWelcomeNotification() {
         Task { await LocalNotifier.sendWelcomeIfNeeded() }
+    }
+
+    /// Per-message diagnostic state accumulated across the reaction lifecycle.
+    /// Used both for structured JSONL logging and for the report dump.
+    private struct ReactionDiagEntry {
+        let messageId: String
+        let spaceId: String?
+        let createdTime: Date?
+        let loadedVia: String
+        let annotationTypes: [String: Int]
+        let hasAttachments: Bool
+        let isOwnMessage: Bool
+
+        var decision: String = ""
+        var skipReason: String?
+        var messageAgeSeconds: Int?
+        var summaryPresent: Bool = false
+        var summaryCount: Int = 0
+        var apiCalls: Int = 0
+        var apiLastElementCount: Int = 0
+        var apiLastErrorCode: Int?
+        var apiLastErrorStatus: String?
+        var parseDroppedCount: Int = 0
+        var fetchedCount: Int = 0
+        var mergeOverwriteWithEmpty: Bool = false
+        var displayedCount: Int = 0
+        var uiMismatch: Bool = false
     }
 }
 
