@@ -1624,6 +1624,7 @@ class ChatViewModel: NSObject,ObservableObject {
                     "errorCode": NSNull(),
                     "errorStatus": NSNull(),
                     "retryAfter": NSNull(),
+                    "fullMessageId": messageId,
                 ]
             )
             ReactionDiagnosticsLogger.shared.log(
@@ -1634,6 +1635,7 @@ class ChatViewModel: NSObject,ObservableObject {
                 loadedVia: force ? "poll" : "viewport",
                 fields: [
                     "fetchedCount": reactions.count,
+                    "fullMessageId": messageId,
                 ]
             )
             guard reactionMutationRevision[messageId] == revision,
@@ -1650,6 +1652,7 @@ class ChatViewModel: NSObject,ObservableObject {
                         "reason": "stale_response",
                         "revision": revision as Any,
                         "currentRevision": reactionMutationRevision[messageId] as Any,
+                        "fullMessageId": messageId,
                     ]
                 )
                 // A newer local state exists; this snapshot is stale.
@@ -1675,6 +1678,8 @@ class ChatViewModel: NSObject,ObservableObject {
                         "elementCount": 0,
                         "errorCode": nsError.code,
                         "errorStatus": "cancelled",
+                        "fullMessageId": messageId,
+                        "cancellationStack": Thread.callStackSymbols.filter { $0.contains("ChatViewModel") || $0.contains("ViewportRefresh") || $0.contains("loadReactions") || $0.contains("Task") }.prefix(8),
                     ]
                 )
                 return
@@ -1692,6 +1697,7 @@ class ChatViewModel: NSObject,ObservableObject {
                     "errorCode": nsError.code,
                     "errorStatus": errorStatus as Any,
                     "retryAfter": retryAfter as Any,
+                    "fullMessageId": messageId,
                 ]
             )
             print("❌ Failed to load reactions for \(messageId): \(error)")

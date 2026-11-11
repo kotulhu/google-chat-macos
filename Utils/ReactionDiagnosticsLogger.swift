@@ -1,5 +1,18 @@
 import Foundation
 
+/// Protocol trick to detect and unwrap `Optional<Wrapped>` values stored as `Any`.
+/// `JSONSerialization` cannot serialize `Optional<Any>.none` or `ArraySlice`,
+/// so we normalize them before passing the dictionary to the encoder.
+private protocol AnyOptional {
+    var isSome: Bool { get }
+    var wrapped: Any { get }
+}
+
+extension Optional: AnyOptional {
+    var isSome: Bool { self != nil }
+    var wrapped: Any { self.map { $0 } ?? NSNull() }
+}
+
 /// Diagnostic observability logger for the "reactions displayed selectively" bug.
 ///
 /// Writes one JSON object per line (JSON Lines) to
@@ -81,6 +94,28 @@ final class ReactionDiagnosticsLogger {
         loadedVia: String?,
         fields: [String: Any]
     ) {
+        do {
+            try _logThrowing(
+                stage: stage,
+                messageId: messageId,
+                spaceId: spaceId,
+                createdTime: createdTime,
+                loadedVia: loadedVia,
+                fields: fields
+            )
+        } catch {
+            // Best-effort logging; never throw.
+        }
+    }
+
+    private func _logThrowing(
+        stage: String,
+        messageId: String?,
+        spaceId: String?,
+        createdTime: Date?,
+        loadedVia: String?,
+        fields: [String: Any]
+    ) throws {
         var record: [String: Any] = [
             "ts": ISO8601DateFormatter.localString(from: Date()),
             "thread": Thread.isMainThread ? "MAIN" : String(describing: Thread.current),
@@ -90,12 +125,32 @@ final class ReactionDiagnosticsLogger {
         if let spaceId { record["spaceId"] = String(spaceId.suffix(6)) }
         if let createdTime { record["createdTime"] = ISO8601DateFormatter.localString(from: createdTime) }
         if let loadedVia { record["loadedVia"] = loadedVia }
-        for (k, v) in fields { record[k] = v }
+        for (k, v) in fields { record[k] = sanitize(v) }
 
-        guard let data = try? JSONSerialization.data(withJSONObject: record),
-              let line = String(data: data, encoding: .utf8) else { return }
-
+        let data = try JSONSerialization.data(withJSONObject: record)
+        guard let line = String(data: data, encoding: .utf8) else { return }
         _appendLine(line + "\n")
+    }
+
+    /// Recursively sanitizes a value so it is safe for `JSONSerialization`.
+    /// - Replaces `nil` optionals with `NSNull()`
+    /// - Converts `ArraySlice` to `Array`
+    /// - Leaves everything else unchanged
+    private func sanitize(_ value: Any) -> Any {
+        if let optional = value as? AnyOptional {
+            return optional.isSome ? sanitize(optional.wrapped) : NSNull()
+        }
+        if let array = value as? [Any] {
+            return array.map { sanitize($0) }
+        }
+        if let dict = value as? [String: Any] {
+            return dict.mapValues { sanitize($0) }
+        }
+        if value is String || value is Int || value is Double || value is Bool || value is NSNull {
+            return value
+        }
+        // Fallback: stringify anything else (dates, URLs, Thread objects, etc.)
+        return String(describing: value)
     }
 
     private func _appendLine(_ line: String) {

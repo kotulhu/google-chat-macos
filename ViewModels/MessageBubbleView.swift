@@ -123,6 +123,24 @@ if let forwarded = message.forwardedMessage {
                                         .clipShape(Capsule())
                                 }
                                 .buttonStyle(.plain)
+                                .onAppear {
+                                    ReactionDiagnosticsLogger.shared.log(
+                                        stage: "ui",
+                                        messageId: message.id,
+                                        spaceId: nil,
+                                        createdTime: message.timestamp,
+                                        loadedVia: nil,
+                                        fields: [
+                                            "modelReactionCount": message.reactions.count,
+                                            "displayedReactionCount": message.reactions.count,
+                                            "uiMismatch": false,
+                                            "chipEmoji": reaction.emoji,
+                                            "chipCount": reaction.count,
+                                            "chipIsMine": reaction.isMine,
+                                            "chipEvent": "render",
+                                        ]
+                                    )
+                                }
                             }
                         }
                     }
@@ -138,6 +156,23 @@ if let forwarded = message.forwardedMessage {
                                 "modelReactionCount": message.reactions.count,
                                 "displayedReactionCount": message.reactions.count,
                                 "uiMismatch": false,
+                                "chipEvent": "sectionAppear",
+                            ]
+                        )
+                    }
+                    .onChange(of: message.reactions.count) { oldCount, newCount in
+                        ReactionDiagnosticsLogger.shared.log(
+                            stage: "ui",
+                            messageId: message.id,
+                            spaceId: nil,
+                            createdTime: message.timestamp,
+                            loadedVia: nil,
+                            fields: [
+                                "modelReactionCount": newCount,
+                                "displayedReactionCount": newCount,
+                                "uiMismatch": false,
+                                "oldCount": oldCount,
+                                "chipEvent": "countChanged",
                             ]
                         )
                     }
