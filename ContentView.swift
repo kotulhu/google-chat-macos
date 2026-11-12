@@ -1,5 +1,34 @@
 import SwiftUI
 
+/// Наблюдает за высотой главного окна приложения, чтобы ограничить поле
+/// ввода сообщения 50% от высоты окна.
+final class WindowHeightObserver: ObservableObject {
+    @Published var height: CGFloat = 600
+    private var observer: NSObjectProtocol?
+
+    init() {
+        if let window = NSApp.windows.first {
+            height = window.frame.height
+        }
+        observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            if let window = NSApp.windows.first {
+                self.height = window.frame.height
+            }
+        }
+    }
+
+    deinit {
+        if let observer = observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+}
+
 /// The root view of the app.
 ///
 /// Shows the login screen while the user is signed out and the main chat
@@ -338,6 +367,7 @@ struct ChatDetailView: View {
     @State private var scrollProxy: ScrollViewProxy?
     @State private var mentionQuery: String?
     @State private var inputHeight: CGFloat = 36
+    @StateObject private var windowObserver = WindowHeightObserver()
     @State private var isShowingMembers = false
     @State private var editingMessage: Message?
     @State private var editingText = ""
@@ -970,8 +1000,9 @@ struct ChatDetailView: View {
                         text: $newMessageText,
                         onSend: { sendInputMessage() },
                         onHeightChange: { height in
-                            inputHeight = height
-                        }
+                            inputHeight = min(height, windowObserver.height * 0.5)
+                        },
+                        maxHeight: windowObserver.height * 0.5
                     )
                     .frame(height: inputHeight)
                     .padding(8)

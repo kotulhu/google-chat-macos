@@ -32,9 +32,10 @@ struct MessageInputTextView: NSViewRepresentable {
     @Binding var text: String
     var onSend: () -> Void
     var onHeightChange: (CGFloat) -> Void = { _ in }
+    /// Максимальная высота поля ввода (обычно 50% от высоты окна).
+    var maxHeight: CGFloat = 120
     
     private static let minHeight: CGFloat = 36
-    private static let maxHeight: CGFloat = 120
     
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -62,7 +63,7 @@ struct MessageInputTextView: NSViewRepresentable {
         textView.autoresizingMask = [.width]
         textView.drawsBackground = false
         textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.containerSize = NSSize(width: 0, height: Self.maxHeight)
+        textView.textContainer?.containerSize = NSSize(width: 0, height: maxHeight)
         
         scrollView.documentView = textView
         context.coordinator.textView = textView
@@ -76,35 +77,42 @@ struct MessageInputTextView: NSViewRepresentable {
             textView.string = text
             textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         }
+        // Переустанавливаем размер контейнера только при изменении лимита (размер окна),
+        // чтобы не сбивать фокус и позицию курсора при каждом нажатии клавиши.
+        if context.coordinator.lastMaxHeight != maxHeight {
+            textView.textContainer?.containerSize = NSSize(width: 0, height: maxHeight)
+            context.coordinator.lastMaxHeight = maxHeight
+        }
         DispatchQueue.main.async {
-            context.coordinator.reportHeight()
+            context.coordinator.reportHeight(maxHeight: maxHeight)
         }
     }
     
-    static func contentHeight(for textView: NSTextView) -> CGFloat {
+    func contentHeight(for textView: NSTextView, maxHeight: CGFloat) -> CGFloat {
         textView.layoutManager?.ensureLayout(for: textView.textContainer!)
         let usedHeight = textView.layoutManager?.usedRect(for: textView.textContainer!).height ?? 0
         let height = usedHeight + textView.textContainerInset.height * 2 + 2
-        return min(max(height, minHeight), maxHeight)
+        return min(max(height, Self.minHeight), maxHeight)
     }
     
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MessageInputTextView
         weak var textView: NSTextView?
+        var lastMaxHeight: CGFloat = -1
         
         init(_ parent: MessageInputTextView) {
             self.parent = parent
         }
         
-        func reportHeight() {
+        func reportHeight(maxHeight: CGFloat) {
             guard let textView = textView else { return }
-            parent.onHeightChange(MessageInputTextView.contentHeight(for: textView))
+            parent.onHeightChange(parent.contentHeight(for: textView, maxHeight: maxHeight))
         }
         
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
-            parent.onHeightChange(MessageInputTextView.contentHeight(for: textView))
+            parent.onHeightChange(parent.contentHeight(for: textView, maxHeight: parent.maxHeight))
         }
     }
 }
