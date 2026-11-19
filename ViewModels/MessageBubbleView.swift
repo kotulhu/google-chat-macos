@@ -123,7 +123,12 @@ if let forwarded = message.forwardedMessage {
                                         .clipShape(Capsule())
                                 }
                                 .buttonStyle(.plain)
+                                // Всплывающая подсказка с логами поставивших реакцию.
+                                .help(reactionUsersText(reaction))
                                 .onAppear {
+                                    // Подтягиваем имена пользователей, которые ещё не разрешены,
+                                    // чтобы подсказка обновлялась по мере готовности данных.
+                                    Task { await nameResolver.resolve(userIds: Set(reaction.userIds)) }
                                     ReactionDiagnosticsLogger.shared.log(
                                         stage: "ui",
                                         messageId: message.id,
@@ -321,6 +326,13 @@ if let forwarded = message.forwardedMessage {
         Task {
             await onToggleReaction?(message.id, emoji)
         }
+    }
+
+    /// Собирает строку с логами пользователей, поставивших реакцию, для всплывающей
+    /// подсказки. Имена разрешаются через NameResolver (имя → email → краткий ID).
+    private func reactionUsersText(_ reaction: MessageReaction) -> String {
+        let names = reaction.userIds.map { nameResolver.displayName(for: $0) }
+        return names.joined(separator: ", ")
     }
 
     /// Renders the snapshot embedded in a forwarded message. Unlike a quote,
