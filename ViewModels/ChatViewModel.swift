@@ -103,6 +103,34 @@ class ChatViewModel: NSObject,ObservableObject {
         await self?.loadReactions(for: messageId, force: true)
     }
 
+    // MARK: - Reaction load state machine & queue
+
+    /// Состояние загрузки Reaktion для одного сообщения.
+    private enum ReactionLoadState: Equatable {
+        case notLoaded
+        case loading
+        case loaded
+        case failed(retryAfter: Date, attempts: Int)
+    }
+
+    /// Текущее состояние загрузки по messageId.
+    private var reactionLoadState: [String: ReactionLoadState] = [:]
+    /// Независимые задачи загрузки (не отменяются debounce/markHidden).
+    private var reactionLoadTasks: [String: Task<Void, Never>] = [:]
+    /// Очередь messageId, ожидающих свободного слота параллельности.
+    private var reactionLoadQueue: [String] = []
+    /// Количество в полёте API-запросов reactions.list.
+    private var reactionInflightCount: Int = 0
+    /// Максимальная параллельность одновременных запросов.
+    private let reactionMaxInflight = 4
+    /// Количество попыток для backoff (сбрасывается при успешной загрузке).
+    private var reactionRetryAttempts: [String: Int] = [:]
+    /// Счётчики для сессионной диагностики.
+    private var reactionStatSuccess = 0
+    private var reactionStatCancelled = 0
+    private var reactionStatRetried = 0
+    private var reactionStatBySpace: [String: (success: Int, cancelled: Int, retried: Int)] = [:]
+
     /// Watches the local queue and fires scheduled messages whose time arrived,
     /// reusing the regular send/upload path.
     private lazy var scheduledMessagesService = ScheduledMessageService(
@@ -445,6 +473,36 @@ class ChatViewModel: NSObject,ObservableObject {
         pollTimer?.invalidate()
         pollTimer = nil
         reactionViewportController.stop()
+        // Отменяем незавершённые задачи загрузки Reaktion для текущего пространства.
+        let spaceId = selectedSpace?.id
+        let cancelledIds = reactionLoadTasks.keys.filter { _ in true }
+        for messageId in cancelledIds {
+            reactionLoadTasks[messageId]?.cancel()
+            reactionLoadTasks.removeValue(forKey: messageId)
+            reactionLoadState[messageId] = .notLoaded
+            reactionStatCancelled += 1
+            if let spaceId {
+                var stat = reactionStatBySpace[spaceId] ?? (0, 0, 0)
+                stat.cancelled += 1
+                reactionStatBySpace[spaceId] = stat
+            }
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "api",
+                messageId: messageId,
+                spaceId: spaceId,
+                createdTime: nil,
+                loadedVia: "poll",
+                fields: [
+                    "durationMs": 0,
+                    "elementCount": 0,
+                    "errorCode": -999,
+                    "errorStatus": "cancelled",
+                    "fullMessageId": messageId,
+                    "cancellationReason": "polling_stopped",
+                ]
+            )
+        }
+        reactionLoadQueue.removeAll { _ in true }
         print("🛑 Polling stopped  reactions-viewport=stopped")
     }
     
@@ -1520,10 +1578,11 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Notifies the reaction viewport controller that a message became visible
     /// (so lazy reaction loading can trigger).
     func markReactionViewportVisible(id: String) {
+        let spaceId = selectedSpace?.id
         ReactionDiagnosticsLogger.shared.log(
             stage: "decision",
             messageId: id,
-            spaceId: nil,
+            spaceId: spaceId,
             createdTime: nil,
             loadedVia: "viewport",
             fields: [
@@ -1532,14 +1591,16 @@ class ChatViewModel: NSObject,ObservableObject {
             ]
         )
         reactionViewportController.markVisible(id: id)
+        Task { await processReactionLoadQueue() }
     }
 
     /// Notifies the reaction viewport controller that a message left the viewport.
     func markReactionViewportHidden(id: String) {
+        let spaceId = selectedSpace?.id
         ReactionDiagnosticsLogger.shared.log(
             stage: "decision",
             messageId: id,
-            spaceId: nil,
+            spaceId: spaceId,
             createdTime: nil,
             loadedVia: "viewport",
             fields: [
@@ -1553,155 +1614,250 @@ class ChatViewModel: NSObject,ObservableObject {
     /// Loads reactions for a message (unless cached, or unless `force` is set),
     /// then applies them to the display list.
     ///
-    /// A response is only applied when no local mutation happened while the
-    /// request was in flight. Otherwise a slow GET (or a forced viewport
-    /// refresh) could overwrite a reaction the user just added or removed.
+    /// Загрузка выполняется в независимой Task и не отменяется при
+    /// markHidden / повторном markVisible. Отменяется только при смене
+    /// пространства или остановке polling.
     func loadReactions(for messageId: String, force: Bool = false) async {
         let shortId = messageId.suffix(12)
         let startTime = Date()
-        let cachedCount = reactionCache[messageId]?.count ?? 0
-        if !force, let cached = reactionCache[messageId] {
-            ReactionDiagnosticsLogger.shared.log(
-                stage: "decision",
-                messageId: messageId,
-                spaceId: nil,
-                createdTime: nil,
-                loadedVia: force ? "poll" : "viewport",
-                fields: [
-                    "decision": "skip",
-                    "reason": "skipped_already_cached",
-                    "cachedCount": cached.count,
-                ]
-            )
-            applyReactions(cached, to: messageId)
-            return
-        }
-        guard !loadingReactionMessageIds.contains(messageId), let service = chatService else {
-            let reason: String
-            if loadingReactionMessageIds.contains(messageId) {
-                reason = "skipped_backoff"
-            } else {
-                reason = "skipped_other"
-            }
-            ReactionDiagnosticsLogger.shared.log(
-                stage: "decision",
-                messageId: messageId,
-                spaceId: nil,
-                createdTime: nil,
-                loadedVia: force ? "poll" : "viewport",
-                fields: [
-                    "decision": "skip",
-                    "reason": reason,
-                    "loading": loadingReactionMessageIds.contains(messageId),
-                    "service": chatService != nil,
-                ]
-            )
-            return
-        }
+        let spaceId = selectedSpace?.id
 
-        let revision = reactionMutationRevision[messageId]
-        loadingReactionMessageIds.insert(messageId)
-        defer { loadingReactionMessageIds.remove(messageId) }
+        // --- Состояние загрузки ---
+        let currentState = reactionLoadState[messageId] ?? .notLoaded
 
-        PerfBeacon.start("React", phase: force ? "loadReactions(force)" : "loadReactions")
-        do {
-            let reactions = try await service.fetchReactions(messageId: messageId)
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "count=\(reactions.count), message=\(messageId.suffix(12))")
-            // Try to detect nextPageToken from the response for logging.
-            // We don't have direct access here; log what we know.
-            ReactionDiagnosticsLogger.shared.log(
-                stage: "api",
-                messageId: messageId,
-                spaceId: nil,
-                createdTime: nil,
-                loadedVia: force ? "poll" : "viewport",
-                fields: [
-                    "httpStatus": 200 as Any,
-                    "durationMs": durationMs,
-                    "elementCount": reactions.count,
-                    "hasNextPageToken": false as Any,
-                    "errorCode": NSNull(),
-                    "errorStatus": NSNull(),
-                    "retryAfter": NSNull(),
-                    "fullMessageId": messageId,
-                ]
-            )
-            ReactionDiagnosticsLogger.shared.log(
-                stage: "api",
-                messageId: messageId,
-                spaceId: nil,
-                createdTime: nil,
-                loadedVia: force ? "poll" : "viewport",
-                fields: [
-                    "fetchedCount": reactions.count,
-                    "fullMessageId": messageId,
-                ]
-            )
-            guard reactionMutationRevision[messageId] == revision,
-                  !togglingReactionMessageIds.contains(messageId),
-                  Date() >= (reactionMutationGraceUntil[messageId] ?? .distantPast) else {
+        if !force {
+            switch currentState {
+            case .loaded:
+                if let cached = reactionCache[messageId] {
+                    applyReactions(cached, to: messageId)
+                }
+                return
+            case .loading:
+                // Уже в полёте — дедупликация
                 ReactionDiagnosticsLogger.shared.log(
-                    stage: "api",
+                    stage: "decision",
                     messageId: messageId,
-                    spaceId: nil,
+                    spaceId: spaceId,
                     createdTime: nil,
                     loadedVia: force ? "poll" : "viewport",
                     fields: [
                         "decision": "skip",
-                        "reason": "stale_response",
-                        "revision": revision as Any,
-                        "currentRevision": reactionMutationRevision[messageId] as Any,
-                        "fullMessageId": messageId,
+                        "reason": "already_loading",
                     ]
                 )
-                // A newer local state exists; this snapshot is stale.
                 return
+            case .failed(let retryAfter, let attempts):
+                if attempts >= 3 {
+                    return // Максимум попыток исчерпан
+                }
+                if Date() < retryAfter {
+                    return // Ещё не время для повтора
+                }
+                // Повтор после истечения паузы
+            case .notLoaded:
+                break
             }
-            applyReactions(reactions, to: messageId)
-        } catch {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let nsError = error as NSError
-            let httpStatus: Int? = nsError.userInfo["NSHTTPURLResponseStatusCodeKey"] as? Int
-            let errorStatus: String? = nsError.localizedFailureReason ?? nsError.localizedDescription
-            let retryAfter: Int? = nil
-            if nsError.code == NSURLErrorCancelled {
-                PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "ERROR")
+        }
+
+        // --- Очередь и параллельность ---
+        if reactionInflightCount >= reactionMaxInflight {
+            if !reactionLoadQueue.contains(messageId) {
+                reactionLoadQueue.append(messageId)
+            }
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "decision",
+                messageId: messageId,
+                spaceId: spaceId,
+                createdTime: nil,
+                loadedVia: force ? "poll" : "viewport",
+                fields: [
+                    "decision": "skip",
+                    "reason": "queue_full",
+                    "inflight": reactionInflightCount,
+                ]
+            )
+            return
+        }
+
+        reactionLoadState[messageId] = .loading
+        reactionInflightCount += 1
+
+        let task = Task { [weak self] in
+            guard let self, let service = self.chatService else { return }
+            do {
+                let reactions = try await service.fetchReactions(messageId: messageId)
+                let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+
+                // --- Успешный ответ ---
+                self.reactionInflightCount -= 1
+                self.reactionLoadState[messageId] = .loaded
+                self.reactionRetryAttempts[messageId] = 0
+                self.reactionStatSuccess += 1
+                if let spaceId {
+                    var stat = self.reactionStatBySpace[spaceId] ?? (0, 0, 0)
+                    stat.success += 1
+                    self.reactionStatBySpace[spaceId] = stat
+                }
+
                 ReactionDiagnosticsLogger.shared.log(
                     stage: "api",
                     messageId: messageId,
-                    spaceId: nil,
+                    spaceId: spaceId,
+                    createdTime: nil,
+                    loadedVia: force ? "poll" : "viewport",
+                    fields: [
+                        "httpStatus": 200 as Any,
+                        "durationMs": durationMs,
+                        "elementCount": reactions.count,
+                        "hasNextPageToken": false as Any,
+                        "errorCode": NSNull(),
+                        "errorStatus": NSNull(),
+                        "retryAfter": NSNull(),
+                        "fullMessageId": messageId,
+                    ]
+                )
+                ReactionDiagnosticsLogger.shared.log(
+                    stage: "api",
+                    messageId: messageId,
+                    spaceId: spaceId,
+                    createdTime: nil,
+                    loadedVia: force ? "poll" : "viewport",
+                    fields: [
+                        "fetchedCount": reactions.count,
+                        "fullMessageId": messageId,
+                    ]
+                )
+
+                // Пустой список только после успешного ответа.
+                applyReactions(reactions, to: messageId)
+
+                // Обрабатываем очередь
+                await self.processReactionLoadQueue()
+            } catch {
+                self.reactionInflightCount -= 1
+                let nsError = error as NSError
+                let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+
+                if nsError.code == NSURLErrorCancelled {
+                    // Отмена — не ошибка, не лечим повтором.
+                    // Состояние возвращаем в notLoaded, чтобы можно было повторить позже.
+                    self.reactionLoadState[messageId] = .notLoaded
+                    self.reactionStatCancelled += 1
+                    if let spaceId {
+                        var stat = self.reactionStatBySpace[spaceId] ?? (0, 0, 0)
+                        stat.cancelled += 1
+                        self.reactionStatBySpace[spaceId] = stat
+                    }
+
+                    ReactionDiagnosticsLogger.shared.log(
+                        stage: "api",
+                        messageId: messageId,
+                        spaceId: spaceId,
+                        createdTime: nil,
+                        loadedVia: force ? "poll" : "viewport",
+                        fields: [
+                            "durationMs": durationMs,
+                            "elementCount": 0,
+                            "errorCode": nsError.code,
+                            "errorStatus": "cancelled",
+                            "fullMessageId": messageId,
+                            "cancellationReason": "task_cancelled",
+                        ]
+                    )
+                    await self.processReactionLoadQueue()
+                    return
+                }
+
+                // Сетевая ошибка / 429 / 5xx — повтор с backoff.
+                let attempts = (self.reactionRetryAttempts[messageId] ?? 0) + 1
+                self.reactionRetryAttempts[messageId] = attempts
+
+                if attempts >= 3 {
+                    self.reactionLoadState[messageId] = .failed(retryAfter: .distantPast, attempts: attempts)
+                    ReactionDiagnosticsLogger.shared.log(
+                        stage: "api",
+                        messageId: messageId,
+                        spaceId: spaceId,
+                        createdTime: nil,
+                        loadedVia: force ? "poll" : "viewport",
+                        fields: [
+                            "durationMs": durationMs,
+                            "elementCount": 0,
+                            "errorCode": nsError.code,
+                            "errorStatus": nsError.localizedDescription,
+                            "fullMessageId": messageId,
+                            "maxAttemptsReached": true,
+                        ]
+                    )
+                    await self.processReactionLoadQueue()
+                    return
+                }
+
+                // Backoff: 2, 4, 8 сек
+                let backoffSeconds = pow(2.0, Double(attempts))
+                let retryAfter = Date().addingTimeInterval(backoffSeconds)
+                self.reactionLoadState[messageId] = .failed(retryAfter: retryAfter, attempts: attempts)
+                self.reactionStatRetried += 1
+                if let spaceId {
+                    var stat = self.reactionStatBySpace[spaceId] ?? (0, 0, 0)
+                    stat.retried += 1
+                    self.reactionStatBySpace[spaceId] = stat
+                }
+
+                ReactionDiagnosticsLogger.shared.log(
+                    stage: "api",
+                    messageId: messageId,
+                    spaceId: spaceId,
                     createdTime: nil,
                     loadedVia: force ? "poll" : "viewport",
                     fields: [
                         "durationMs": durationMs,
                         "elementCount": 0,
                         "errorCode": nsError.code,
-                        "errorStatus": "cancelled",
+                        "errorStatus": nsError.localizedDescription,
                         "fullMessageId": messageId,
-                        "cancellationStack": Thread.callStackSymbols.filter { $0.contains("ChatViewModel") || $0.contains("ViewportRefresh") || $0.contains("loadReactions") || $0.contains("Task") }.prefix(8),
+                        "retryAfter": backoffSeconds,
+                        "attempt": attempts,
                     ]
                 )
-                return
+
+                // Планируем повторить через backoff
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(backoffSeconds))
+                    await self?.processReactionLoadQueue()
+                }
+
+                await self.processReactionLoadQueue()
             }
-            PerfBeacon.end("React", phase: force ? "loadReactions(force)" : "loadReactions", detail: "ERROR")
-            ReactionDiagnosticsLogger.shared.log(
-                stage: "api",
-                messageId: messageId,
-                spaceId: nil,
-                createdTime: nil,
-                loadedVia: force ? "poll" : "viewport",
-                fields: [
-                    "durationMs": durationMs,
-                    "elementCount": 0,
-                    "errorCode": nsError.code,
-                    "errorStatus": errorStatus as Any,
-                    "retryAfter": retryAfter as Any,
-                    "fullMessageId": messageId,
-                ]
-            )
-            print("❌ Failed to load reactions for \(messageId): \(error)")
         }
+
+        reactionLoadTasks[messageId] = task
+    }
+
+    /// Обрабатывает очередь загрузки Reaktion — запускает до
+    /// reactionMaxInflight одновременных запросов для видимых сообщений.
+    private func processReactionLoadQueue() async {
+        while reactionInflightCount < reactionMaxInflight,
+              !reactionLoadQueue.isEmpty {
+            let messageId = reactionLoadQueue.removeFirst()
+            // Сообщение могло стать невидимым — пропускаем
+            if !reactionViewportController.isVisible(id: messageId) {
+                continue
+            }
+            // Уже загружается или загружено — пропускаем
+            let state = reactionLoadState[messageId] ?? .notLoaded
+            if state == .loading || state == .loaded {
+                continue
+            }
+            await loadReactions(for: messageId, force: true)
+        }
+    }
+
+    /// Сброс состояния загрузки для сообщения (например, при отмене).
+    private func resetReactionLoadState(for messageId: String) {
+        reactionLoadState[messageId] = .notLoaded
+        reactionRetryAttempts[messageId] = nil
+        reactionLoadTasks.removeValue(forKey: messageId)
     }
 
     /// Invalidates reaction GETs that started before a local mutation.
@@ -1994,6 +2150,26 @@ class ChatViewModel: NSObject,ObservableObject {
         let normalized = normalizedReactionOwnership(reactions)
         let wasEmpty = reactionCache[messageId]?.isEmpty ?? true
         let countBefore = reactionCache[messageId]?.count ?? 0
+
+        // Не заменяем непустые реакции пустыми (например, после отменённого запроса).
+        if !wasEmpty && normalized.isEmpty {
+            ReactionDiagnosticsLogger.shared.log(
+                stage: "merge",
+                messageId: messageId,
+                spaceId: nil,
+                createdTime: nil,
+                loadedVia: nil,
+                fields: [
+                    "mergeAction": "overwrite_empty_blocked",
+                    "countBefore": countBefore,
+                    "countAfter": countBefore,
+                    "overwriteWithEmpty": true,
+                    "blocked": true,
+                ]
+            )
+            return
+        }
+
         reactionCache[messageId] = normalized
 
         var updatedMessage: Message?
@@ -2612,6 +2788,36 @@ class ChatViewModel: NSObject,ObservableObject {
         guard let space = spaces.first(where: { $0.id == spaceID }) else {
             print("🔔 [Notify] openSpace: no space with id \(spaceID)")
             return
+        }
+        let previousSpaceId = selectedSpace?.id
+        // Отменяем незавершённые задачи загрузки Reaktion для предыдущего пространства.
+        if let previousSpaceId, previousSpaceId != spaceID {
+            let cancelledIds = reactionLoadTasks.keys
+            for messageId in cancelledIds {
+                reactionLoadTasks[messageId]?.cancel()
+                reactionLoadTasks.removeValue(forKey: messageId)
+                reactionLoadState[messageId] = .notLoaded
+                reactionStatCancelled += 1
+                var stat = reactionStatBySpace[previousSpaceId] ?? (0, 0, 0)
+                stat.cancelled += 1
+                reactionStatBySpace[previousSpaceId] = stat
+                ReactionDiagnosticsLogger.shared.log(
+                    stage: "api",
+                    messageId: messageId,
+                    spaceId: previousSpaceId,
+                    createdTime: nil,
+                    loadedVia: "poll",
+                    fields: [
+                        "durationMs": 0,
+                        "elementCount": 0,
+                        "errorCode": -999,
+                        "errorStatus": "cancelled",
+                        "fullMessageId": messageId,
+                        "cancellationReason": "space_changed",
+                    ]
+                )
+            }
+            reactionLoadQueue.removeAll { _ in true }
         }
         selectedSpace = space
         print("🔔 [Notify] openSpace: \(space.name)")

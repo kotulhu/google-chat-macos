@@ -22,19 +22,29 @@ final class ViewportRefreshController {
 
     func markVisible(id: String) {
         visibleIds.insert(id)
+        // Отменяем старый debounce, создаём новый.
         debounceTasks[id]?.cancel()
         debounceTasks[id] = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(for: .seconds(self.debounceInterval))
             guard !Task.isCancelled, self.visibleIds.contains(id) else { return }
-            await self.onRefresh(id)
+            // Запускаем загрузку в независимой задаче — не отменяется при
+            // markHidden или повторном markVisible.
+            Task { await self.onRefresh(id) }
         }
     }
 
     func markHidden(id: String) {
         visibleIds.remove(id)
+        // Отменяем только ещё не started debounce. Уже запущенная загрузка
+        // (независимая Task) продолжается.
         debounceTasks[id]?.cancel()
         debounceTasks.removeValue(forKey: id)
+    }
+
+    /// Проверяет, находится ли сообщение в области видимости.
+    func isVisible(id: String) -> Bool {
+        visibleIds.contains(id)
     }
 
     func start() {
