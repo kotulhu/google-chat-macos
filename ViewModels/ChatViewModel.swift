@@ -312,6 +312,85 @@ class ChatViewModel: NSObject,ObservableObject {
         reactionDiag[entry.messageId] = mutable
     }
 
+    #if DEBUG
+    /// Дамп сырого JSON сообщения с GIF для отладки (только Debug-сборка).
+    /// Текстовые поля заменяются на "<redacted len=N>", структура сохраняется,
+    /// URL сокращаются до хоста и расширения.
+    private func dumpGifIfNeeded(_ message: Message, spaceId: String?) {
+        guard GifResolver.source(from: message) != nil else { return }
+
+        let raw: [String: Any] = [
+            "id": String(message.id.suffix(6)),
+            "timestamp": message.timestamp.timeIntervalSince1970,
+            "isFromMe": message.isFromMe,
+            "authorName": redact(message.authorName),
+            "senderId": message.senderId ?? NSNull(),
+            "text": redact(message.text),
+            "attachedGifs": message.attachedGifs.map { gif in
+                ["uri": redactUri(gif.uri)]
+            },
+            "attachments": message.attachments.map { redactAttachment($0) },
+            "threadName": message.threadId ?? NSNull(),
+            "isThreadReply": message.isThreadReply,
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: raw,
+                                                      options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return }
+
+        let shortId = String(message.id.suffix(6))
+        let entry = "=== GIF raw message (\(shortId)) ===\n\(text)\n"
+        ReactionDiagnosticsLogger.shared.log(
+            stage: "gif_dump",
+            messageId: message.id,
+            spaceId: spaceId,
+            createdTime: message.timestamp,
+            loadedVia: "gif_dump",
+            fields: [
+                "raw": entry,
+            ]
+        )
+    }
+
+    /// Редактирование текстового поля: замена на "<redacted len=N>".
+    private func redact(_ value: String?) -> Any {
+        guard let s = value, !s.isEmpty else { return NSNull() }
+        return "<redacted len=\(s.count)>"
+    }
+
+    /// URI → только host + расширение.
+    private func redactUri(_ uri: String) -> String {
+        guard let url = URL(string: uri) else { return "<redacted>" }
+        let ext = (uri as NSString).pathExtension.lowercased()
+        return "\(url.host ?? "?")<redacted>\(ext.isEmpty ? "" : ".\(ext)")"
+    }
+
+    /// Редактирование вложения: URL → хост + расширение, имена → redacted.
+    private func redactAttachment(_ att: Attachment) -> [String: Any] {
+        var result: [String: Any] = [
+            "name": redact(att.name),
+            "mimeType": att.mimeType,
+            "size": att.size,
+        ]
+        if let url = att.url {
+            let s = url.absoluteString.lowercased()
+            let host = url.host ?? ""
+            let ext = (s as NSString).pathExtension.lowercased()
+            result["url"] = "\(host)/<redacted>\(ext.isEmpty ? "" : ".\(ext)")"
+        } else {
+            result["url"] = NSNull()
+        }
+        if let thumb = att.thumbnailURL {
+            result["thumbnailURL"] = "\(thumb.host ?? "")/<redacted>\((thumb.pathExtension.isEmpty ? "" : ".\(thumb.pathExtension)"))"
+        } else {
+            result["thumbnailURL"] = NSNull()
+        }
+        result["resourceName"] = redact(att.resourceName)
+        result["uploadToken"] = redact(att.uploadToken)
+        return result
+    }
+    #endif
+
     /// Build a report line entry for a message.
     private func reportEntry(for messageId: String) -> (id: String, time: Date?,
         loadedVia: String?, annotationTypes: [String: Int], summaryCount: Int,
@@ -831,6 +910,12 @@ class ChatViewModel: NSObject,ObservableObject {
             MessageHistoryStore.shared.upsertMessages(page.history)
             PerfBeacon.end("Lenta", phase: "fetch", detail: "count=\(fetchedMessages.count)")
             accessToken = service.currentAccessToken
+
+            #if DEBUG
+            for msg in fetchedMessages {
+                dumpGifIfNeeded(msg, spaceId: space.id)
+            }
+            #endif
 
             if space.type == .direct {
                 await refreshDirectChatMappingAndName(for: space)
@@ -2818,6 +2903,8 @@ class ChatViewModel: NSObject,ObservableObject {
                 )
             }
             reactionLoadQueue.removeAll { _ in true }
+            // GIF-загрузки отменяем только при смене пространства.
+            Task { await GifLoader.shared.cancelAll() }
         }
         selectedSpace = space
         print("🔔 [Notify] openSpace: \(space.name)")

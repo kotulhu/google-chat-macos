@@ -254,10 +254,17 @@ class GoogleChatService {
             let createTime: String?
             let lastUpdateTime: String?
             let attachment: [AttachmentItem]?
+            /// Встроенные GIF из выбора官方 клиента (output-only поле API).
+            let attachedGifs: [AttachedGifItem]?
             let quotedMessageMetadata: QuotedMessageMetadataItem?
             let deletionMetadata: DeletionMetadataItem?
             let thread: ThreadItem?
             let threadReply: Bool?
+        }
+
+        /// API-объект `AttachedGif`: единственное поле `uri`.
+        struct AttachedGifItem: Decodable {
+            let uri: String?
         }
 
         struct ThreadItem: Decodable {
@@ -356,6 +363,12 @@ class GoogleChatService {
             return items
         }()
 
+        #if DEBUG
+        // Сырой JSON ответа spaces.messages.list для сообщений с GIF и
+        // кандидатов в стикеры (пустой text без вложений). Только Debug.
+        dumpRawGifAndStickerMessages(rawItems, spaceId: spaceId)
+        #endif
+
         let typedMessages = decodedResponse.messages ?? []
         var history: [MessageHistoryRecord] = []
         history.reserveCapacity(typedMessages.count)
@@ -378,6 +391,12 @@ class GoogleChatService {
             let timestamp = GoogleChatService.parseGoogleTimestamp(msg.createTime)
             
             let attachments: [Attachment] = msg.attachment?.map(makeAttachment) ?? []
+
+            // attachedGifs — основной источник GIF из встроенного выбора.
+            let attachedGifs: [AttachedGif] = (msg.attachedGifs ?? []).compactMap {
+                guard let uri = $0.uri, !uri.isEmpty else { return nil }
+                return AttachedGif(uri: uri)
+            }
 
             // A forwarded message keeps its payload in `quotedMessageMetadata`
             // instead of the top-level `text`/`attachment` fields. Parse that
@@ -417,7 +436,9 @@ class GoogleChatService {
                 }
             }
 
-            guard !text.isEmpty || !attachments.isEmpty || forwardedMessage != nil else { return nil }
+            // Сообщение с GIF может иметь пустой text и пустые attachment —
+            // раньше такое сообщение отбрасывалось и пузырь не рисовался.
+            guard !text.isEmpty || !attachments.isEmpty || !attachedGifs.isEmpty || forwardedMessage != nil else { return nil }
 
             return Message(
                 id: msg.name,
@@ -426,6 +447,7 @@ class GoogleChatService {
                 isFromMe: isFromMe,
                 timestamp: timestamp,
                 attachments: attachments,
+                attachedGifs: attachedGifs,
                 senderId: isFromMe ? nil : senderId,
                 quotedMessage: quotedMessage,
                 forwardedMessage: forwardedMessage,
@@ -512,6 +534,66 @@ class GoogleChatService {
         }
         return components.queryItems?.first { $0.name == "attachment_token" }?.value
     }
+
+    #if DEBUG
+    /// Редактирование сырого JSON сообщения: тексты и имена → "<redacted len=N>",
+    /// у uri/url оставляем только host и расширение. Структуру сохраняем.
+    private func redactRawValue(_ value: Any, key: String) -> Any {
+        let lower = key.lowercased()
+        let isUriKey = lower == "uri" || lower.contains("uri") || lower == "url" || lower.contains("url")
+        if isUriKey, let string = value as? String {
+            if let url = URL(string: string) {
+                let ext = (string as NSString).pathExtension.lowercased()
+                return "\(url.host ?? "?")<redacted>\(ext.isEmpty ? "" : ".\(ext)")"
+            }
+            return "<redacted len=\(string.count)>"
+        }
+        if let string = value as? String {
+            return "<redacted len=\(string.count)>"
+        }
+        if let dict = value as? [String: Any] {
+            var out: [String: Any] = [:]
+            for (k, v) in dict { out[k] = redactRawValue(v, key: k) }
+            return out
+        }
+        if let array = value as? [Any] {
+            return array.map { redactRawValue($0, key: key) }
+        }
+        if value is NSNull { return NSNull() }
+        return value
+    }
+
+    /// Пишем в debug-лог сырой JSON для сообщений с attachedGifs и для
+    /// стикер-кандидатов (пустой text, нет вложений) — чтобы увидеть реальные поля.
+    private func dumpRawGifAndStickerMessages(_ items: [[String: Any]], spaceId: String) {
+        for item in items {
+            let text = (item["text"] as? String) ?? ""
+            let hasGif = item["attachedGifs"] != nil
+            let attachments = item["attachment"] as? [[String: Any]] ?? []
+            let isStickerCandidate = text.isEmpty && attachments.isEmpty
+                && item["quotedMessageMetadata"] == nil && !hasGif
+            guard hasGif || isStickerCandidate else { continue }
+
+            var redacted: [String: Any] = [:]
+            for (key, value) in item {
+                redacted[key] = redactRawValue(value, key: key)
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: redacted,
+                                                          options: [.prettyPrinted, .sortedKeys]),
+                  let json = String(data: data, encoding: .utf8) else { continue }
+
+            let messageId = (item["name"] as? String) ?? ""
+            ReactionDiagnosticsLogger.shared.log(
+                stage: hasGif ? "gif_raw" : "sticker_raw",
+                messageId: messageId,
+                spaceId: spaceId,
+                createdTime: GoogleChatService.parseGoogleTimestamp(item["createTime"] as? String),
+                loadedVia: hasGif ? "attachedGifs" : "sticker_candidate",
+                fields: ["raw": json]
+            )
+        }
+    }
+    #endif
     
     /// How a created message relates to a thread. Mirrors the API's
     /// `messageReplyOption` enum; the raw strings are sent verbatim.

@@ -1,5 +1,13 @@
 import Foundation
 
+/// Встроенный GIF из выбора официального клиента (API: `Message.attachedGifs[]`).
+/// Output-only поле: у сообщения может быть несколько GIF, каждый со своим `uri`.
+struct AttachedGif: Equatable, Codable {
+    /// Прямая ссылка на GIF (например, `https://media.tenor.com/.../x.gif`).
+    let uri: String
+    var url: URL? { URL(string: uri) }
+}
+
 struct Attachment: Identifiable, Equatable, Codable {
     var id: String { resourceName ?? uploadToken ?? url?.absoluteString ?? name }
     let name: String
@@ -15,6 +23,18 @@ struct Attachment: Identifiable, Equatable, Codable {
         let imageExtensions = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "tiff", "bmp"]
         let ext = (name as NSString).pathExtension.lowercased()
         return imageExtensions.contains(ext)
+    }
+
+    /// Является ли вложение GIF-анимацией.
+    var isGif: Bool {
+        let mime = mimeType.lowercased()
+        if mime == "image/gif" { return true }
+        if let url = url {
+            let s = url.absoluteString.lowercased()
+            if (s as NSString).pathExtension.lowercased() == "gif" { return true }
+            if s.contains("tenor.com") || s.contains("giphy.com") { return true }
+        }
+        return false
     }
     
     private enum CodingKeys: String, CodingKey {
@@ -134,6 +154,8 @@ struct Message: Identifiable, Equatable, Codable {
     let isFromMe: Bool
     let timestamp: Date
     var attachments: [Attachment] = []
+    /// GIF из встроенного выбора (`attachedGifs[]`). Output-only поле API.
+    var attachedGifs: [AttachedGif] = []
     let senderId: String?
     var reactions: [MessageReaction] = []
     var quotedMessage: QuotedMessage?
@@ -183,6 +205,7 @@ struct Message: Identifiable, Equatable, Codable {
         isFromMe: Bool,
         timestamp: Date,
         attachments: [Attachment] = [],
+        attachedGifs: [AttachedGif] = [],
         senderId: String?,
         reactions: [MessageReaction] = [],
         quotedMessage: QuotedMessage? = nil,
@@ -198,6 +221,7 @@ struct Message: Identifiable, Equatable, Codable {
         self.isFromMe = isFromMe
         self.timestamp = timestamp
         self.attachments = attachments
+        self.attachedGifs = attachedGifs
         self.senderId = senderId
         self.reactions = reactions
         self.quotedMessage = quotedMessage
@@ -216,6 +240,7 @@ struct Message: Identifiable, Equatable, Codable {
         isFromMe = try container.decode(Bool.self, forKey: .isFromMe)
         timestamp = try container.decode(Date.self, forKey: .timestamp)
         attachments = try container.decodeIfPresent([Attachment].self, forKey: .attachments) ?? []
+        attachedGifs = try container.decodeIfPresent([AttachedGif].self, forKey: .attachedGifs) ?? []
         senderId = try container.decodeIfPresent(String.self, forKey: .senderId)
         reactions = try container.decodeIfPresent([MessageReaction].self, forKey: .reactions) ?? []
         quotedMessage = try container.decodeIfPresent(QuotedMessage.self, forKey: .quotedMessage)
@@ -233,6 +258,7 @@ struct Message: Identifiable, Equatable, Codable {
         lhs.isFromMe == rhs.isFromMe &&
         lhs.timestamp == rhs.timestamp &&
         lhs.attachments == rhs.attachments &&
+        lhs.attachedGifs == rhs.attachedGifs &&
         lhs.reactions == rhs.reactions &&
         lhs.quotedMessage == rhs.quotedMessage &&
         lhs.forwardedMessage == rhs.forwardedMessage &&
@@ -249,6 +275,7 @@ struct Message: Identifiable, Equatable, Codable {
         case isFromMe
         case timestamp
         case attachments
+        case attachedGifs
         case senderId
         case reactions
         case quotedMessage

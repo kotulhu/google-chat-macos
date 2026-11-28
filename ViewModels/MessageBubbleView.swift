@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// A single message row: sender name, attributed text, reactions, attachment
 /// rows and the timestamp. Messages from the current user are right-aligned.
@@ -34,7 +35,22 @@ struct MessageBubbleView: View {
     /// People API has no photo for a sender.
     var memberAvatarURLs: [String: URL] = [:]
     @State private var showReactionPicker = false
-    
+    /// Видимость строки управляет анимацией GIF (первый кадр вне viewport).
+    @State private var isInViewport = false
+
+    /// GIF-источники, которые нужно показать отдельным блоком. attachedGifs —
+    /// основной источник; запасные (ссылка в тексте / GIF-вложение) добавляем
+    /// только если вложений нет (иначе они уже рисуются в AttachmentRow).
+    private var inlineGifSources: [GifSource] {
+        if !message.attachedGifs.isEmpty {
+            return GifResolver.sources(from: message)
+        }
+        if message.attachments.isEmpty {
+            return GifResolver.sources(from: message)
+        }
+        return []
+    }
+
     var body: some View {
         PerfBeacon.markRareView("Render", phase: "bubbleBody", detail: "id=\(message.id.suffix(12)), len=\(message.text.count)")
         HStack {
@@ -70,7 +86,10 @@ if let forwarded = message.forwardedMessage {
                     quotedBlock(quoted)
                 }
 
-                if !message.text.isEmpty {
+                // Сообщение с GIF может иметь пустой text — пузырь не рисуем.
+                // Если текст состоит только из ссылки на этот GIF, ссылку тоже
+                // скрываем (она продублирована самим GIF).
+                if !message.text.isEmpty && !GifResolver.isTextOnlyGifLink(message) {
                     let attributedText = PerfBeacon.measureReturn("Render", phase: "attributed", minMs: 3, detail: "len=\(message.text.count)") {
                         message.text.attributedStringWithLinks(
                             mentionDisplayNames: mentionDisplayNames,
@@ -102,8 +121,26 @@ if let forwarded = message.forwardedMessage {
                         ForEach(message.attachments) { attachment in
                             AttachmentRow(
                                 attachment: attachment,
+                                message: message,
                                 accessToken: accessToken
                             )
+                        }
+                    }
+                }
+
+                // attachedGifs (и запасная ссылка в тексте) — отдельный блок:
+                // у сообщения может не быть ни text, ни attachment, поэтому
+                // раньше такой пузырь оставался пустым и не отображался.
+                if !inlineGifSources.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(inlineGifSources, id: \.url) { source in
+                            GifView(
+                                source: source,
+                                accessToken: accessToken,
+                                isVisible: isInViewport
+                            ) {
+                                NSWorkspace.shared.open(source.url)
+                            }
                         }
                     }
                 }
@@ -233,9 +270,11 @@ if let forwarded = message.forwardedMessage {
             }
         }
         .onAppear {
+            isInViewport = true
             onViewportVisible?(message.id)
         }
         .onDisappear {
+            isInViewport = false
             onViewportHidden?(message.id)
         }
     }
@@ -388,6 +427,7 @@ if let forwarded = message.forwardedMessage {
                         ForEach(forwarded.attachments) { attachment in
                             AttachmentRow(
                                 attachment: attachment,
+                                message: message,
                                 accessToken: accessToken
                             )
                         }
@@ -488,6 +528,7 @@ if let forwarded = message.forwardedMessage {
 /// button, or a file card with icon, name and size for other files.
 struct AttachmentRow: View {
     let attachment: Attachment
+    let message: Message
     let accessToken: String
     @State private var imageData: Data?
     @State private var isLoading = true
@@ -504,6 +545,9 @@ struct AttachmentRow: View {
     /// probed pixel size *before* the bytes arrive, so the row occupies the same
     /// height in the loading and the loaded state and the feed never reflows.
     @State private var reservedAspectRatio: CGFloat = ImageDimensions.fallbackAspectRatio
+
+    /// GIF-состояние (запасной источник — GIF-вложение).
+    @State private var gifSource: GifSource?
 
     private static let maxImageHeight: CGFloat = 500
     /// Grace period between a row becoming visible and its download starting.
@@ -526,7 +570,12 @@ struct AttachmentRow: View {
             .onAppear { isInViewport = true }
             .onDisappear { isInViewport = false }
             .task(id: isInViewport) {
-                guard isInViewport, attachment.isImage else { return }
+                guard isInViewport else { return }
+                if attachment.isGif {
+                    // GIF: через GifLoader, не привязан к жизненному циклу строки
+                    return
+                }
+                guard attachment.isImage else { return }
                 // Cached bytes cost nothing to show, so they skip the delay.
                 if ImageCache.shared.get(forKey: imageCacheKey) == nil {
                     try? await Task.sleep(for: .seconds(Self.imageLoadDelay))
@@ -538,11 +587,20 @@ struct AttachmentRow: View {
                 guard !Task.isCancelled else { return }
                 await loadImage()
             }
+            // Разрешение GIF-источника происходит один раз при создании строки.
+            .task {
+                if attachment.isGif, let url = attachment.url {
+                    gifSource = GifSource(url: url, width: nil, height: nil,
+                                          messageId: message.id)
+                }
+            }
     }
 
     private var content: some View {
         Group {
-            if attachment.isImage {
+            if attachment.isGif {
+                gifContent
+            } else if attachment.isImage {
                 if let imageData, let nsImage = NSImage(data: imageData) {
                     VStack(alignment: .leading, spacing: 4) {
                         imageSlot(aspectRatio: reservedAspectRatio) {
@@ -631,6 +689,36 @@ struct AttachmentRow: View {
             .aspectRatio(aspectRatio, contentMode: .fit)
             .frame(maxWidth: .infinity, maxHeight: Self.maxImageHeight)
             .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// GIF-контент: через GifLoader + GifView. Место резервируется до загрузки
+    /// (запасное соотношение 4:3), после загрузки высота не сдвигает прокрутку.
+    /// GifView сам загружает данные и включает анимацию только в viewport.
+    private var gifContent: some View {
+        Group {
+            if let source = gifSource {
+                GifView(
+                    source: source,
+                    accessToken: accessToken,
+                    isVisible: isInViewport
+                ) {
+                    NSWorkspace.shared.open(source.url)
+                }
+            } else {
+                // Заглушка на время разрешения источника
+                loadingView
+            }
+        }
+    }
+
+    private var loadingView: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .fill(Color.gray.opacity(0.15))
+            .overlay {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            .frame(maxWidth: 320, maxHeight: 240)
     }
 
     /// Falls back to the decoded image's own ratio only when the header probe
